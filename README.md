@@ -33,6 +33,48 @@ La web usa `.next-dev` durante desarrollo y `.next` para producción, de modo qu
 `npm run build --workspace @playsport/web` no sobrescriba los archivos del servidor
 de desarrollo mientras está activo.
 
+## Entrada integrada de la plataforma
+
+La web comienza en `http://localhost:3000/`: bienvenida, identidad ficticia,
+elección de perfil y un inicio de trabajo con sus módulos. No empieza en una
+planilla ni requiere conocer enlaces internos. Los seis perfiles ya existentes
+en la app móvil (fanático, jugador, manager, organizador, anotador y scout)
+comparten ahora su catálogo y asignación de módulos desde
+`packages/shared/src/platform.ts`.
+
+El manager elige el equipo ficticio local o visitante. Cada perfil muestra la
+cuenta de demostración que utiliza. La barra superior permite volver al inicio
+y cambiar de perfil desde cualquier módulo. El perfil se conserva en
+`sessionStorage` durante la pestaña; cambiarlo no borra el partido ni los
+guardados privados. Los enlaces anteriores a las bandejas siguen funcionando
+y seleccionan explícitamente el perfil correspondiente en la misma pestaña,
+sin abrir otra pantalla independiente. Las bandejas regresan al inicio del
+perfil activo.
+
+| Módulo web | Estado integrado |
+| --- | --- |
+| Pizarra en vivo | Disponible: anotación para organizador/anotador, preparación de lineup para manager y consulta pública sin controles de escritura para fanático/jugador/scout. |
+| Centro del manager | Disponible como acceso al mismo partido asignado, sin duplicar la herramienta. |
+| Centro del organizador | Parcial: acceso a la herramienta oficial; falta la administración web completa de torneos, calendario, sedes y rosters. |
+| Cartelera y mapa | Presentación y alcance; operaciones pendientes. |
+| Posiciones y honores | Presentación y alcance; clasificación y honores por torneo pendientes. |
+| Tribuna y prensa | Presentación y alcance; publicaciones y moderación pendientes. |
+| Marketplace | Presentación y alcance; comercio pendiente. |
+| Perfil del jugador | Presentación y alcance; trayectoria y estadísticas históricas pendientes. |
+| Sponsors y partners | Presentación y alcance; gestión comercial pendiente. |
+| Scouting y talento | Presentación y alcance; búsqueda y watchlists pendientes. |
+
+El inicio también reúne este inventario. Los módulos pendientes muestran su
+alcance, no botones que simulen operaciones terminadas. Los datos y las tarjetas
+de ejemplo de la app móvil siguen siendo demostrativos, no una prueba de que
+sus operaciones tengan backend.
+
+**No es autenticación real:** seleccionar perfiles no crea cuentas, verifica
+identidades ni concede permisos de producción. Los módulos API de usuarios y
+auth aún son placeholders. El registro, el inicio de sesión, la autorización
+vinculada a cuentas y la persistencia duradera siguen pendientes. El juego del
+demo permanece en memoria del API, no en el commit de Git.
+
 La demo de anotación incluye un calendario ficticio para `tour-global-1`.
 La herramienta compacta de anotación está en
 `http://localhost:3000/demo/live-scoring?view=scorekeeper` y `?view=organizer`.

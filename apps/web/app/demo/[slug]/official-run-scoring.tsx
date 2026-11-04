@@ -33,12 +33,13 @@ export function readOfficialScorecard(value: unknown): Snapshot {
 }
 const message = (error: unknown) => error instanceof Error ? error.message : 'No se pudo completar la anotación oficial.';
 
-export default function OfficialRunScoring({ apiBase, actorId, actorRole, connection: providedConnection,
+export default function OfficialRunScoring({ apiBase, actorId = '', actorRole = 'manager', publicView = false, connection: providedConnection,
   gameId = 'game-global-1', tournamentId = 'tour-global-1', onBack, ownTeamId }: {
-  apiBase: string; actorId: string; actorRole: PersonnelRole; connection?: TeamSheetConnection;
+  apiBase: string; connection?: TeamSheetConnection;
   gameId?: string; tournamentId?: string; ownTeamId?: string; onBack?: () => void;
-}) {
-  const localConnection = useTeamSheets({ apiBase, gameId, tournamentId, userId: actorId, role: actorRole, enabled: !providedConnection });
+} & ({ publicView: true; actorId?: never; actorRole?: never } |
+  { publicView?: false; actorId: string; actorRole: PersonnelRole })) {
+  const localConnection = useTeamSheets({ apiBase, gameId, tournamentId, userId: actorId, role: actorRole, enabled: !providedConnection && !publicView });
   const connection = providedConnection ?? localConnection;
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const latest = useRef<Snapshot | null>(null);
@@ -50,7 +51,7 @@ export default function OfficialRunScoring({ apiBase, actorId, actorRole, connec
   const [selectedSide, setSelectedSide] = useState<Side>('home');
   const [arrival, setArrival] = useState('');
   const path = `${apiBase}/games/${gameId}`;
-  const readOnly = actorRole === 'manager';
+  const readOnly = publicView || actorRole === 'manager';
   const accept = (value: unknown) => {
     const next = readOfficialScorecard(value);
     if (!latest.current || next.state.officialVersion >= latest.current.state.officialVersion) {
@@ -129,9 +130,9 @@ export default function OfficialRunScoring({ apiBase, actorId, actorRole, connec
   const sheet = connection.data?.sheets.find((entry) => entry.teamId === teamId);
   const present = sheet ? [...sheet.lineup, ...sheet.presentSubstitutes].map((player) => player.identificationNumber) : [];
   const ready = Boolean(state?.lineups.home.length && state.lineups.away.length);
-  const blocked = busy || !ready || !connection.data || !readOnly && !connection.data.canDecide ||
+  const blocked = busy || !ready || !publicView && !connection.data || !readOnly && !connection.data?.canDecide ||
     Boolean(streamError || connection.streamError || connection.error);
-  return <section className="officialScorecard" aria-label={readOnly ? 'Consulta oficial del manager' : 'Herramienta de anotación oficial'}>
+  return <section className="officialScorecard" aria-label={publicView ? 'Consulta pública del partido' : readOnly ? 'Consulta oficial del manager' : 'Herramienta de anotación oficial'}>
     <div className="managerCard managerButtonRow">
       <strong>{readOnly ? 'Consulta oficial en vivo · Sin edición' : 'Anotación oficial · Compartida con ambos managers'}</strong>
       {onBack ? <button type="button" className="managerButtonOutline" onClick={onBack}>Volver al partido y al lineup</button> : null}
@@ -151,7 +152,7 @@ export default function OfficialRunScoring({ apiBase, actorId, actorRole, connec
       homeId={teams.homeTeamId} awayId={teams.awayTeamId} ownSide={side}
       homeName={names[teams.homeTeamId] ?? teams.homeTeamId} awayName={names[teams.awayTeamId] ?? teams.awayTeamId}
       initialLineup={state.lineups[side]} positionLabels={fieldPositionLabels}
-      onBack={onBack ?? (() => { globalThis.location.href = '/demo/live-scoring'; })}
+      onBack={onBack ?? (() => { globalThis.location.href = publicView ? '/' : '/demo/live-scoring'; })}
       official={{
         session: {
           seed: state.seed, commands: snapshot.playByPlay.lastScorecardCommand ? [snapshot.playByPlay.lastScorecardCommand] : [],

@@ -1,6 +1,7 @@
 export * from './game-personnel.js';
 export * from './earned-runs.js';
 export * from './scorecard.js';
+export * from './platform.js';
 
 export enum UserRole { Athlete = 'athlete', Organizer = 'organizer', Coach = 'coach', Admin = 'admin', Fan = 'fan' }
 export enum SportType { Football = 'football', Basketball = 'basketball', Baseball = 'baseball', Volleyball = 'volleyball', Other = 'other' }

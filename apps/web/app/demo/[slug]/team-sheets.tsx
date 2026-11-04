@@ -182,9 +182,9 @@ export function personnelDescription(action: PersonnelAction, positionLabels: Re
 
 export function DemoRecipientLinks() {
   return <nav className="managerButtonRow" aria-label="Bandejas de destinatarios de demostración">
-    <a className="managerButtonOutline" href="/demo/live-scoring?view=organizer" target="_blank" rel="noreferrer">Ver bandeja del organizador</a>
-    <a className="managerButtonOutline" href="/demo/live-scoring?view=scorekeeper" target="_blank" rel="noreferrer">Ver bandeja del anotador</a>
-    <a className="managerButtonOutline" href="/demo/live-scoring?view=rival" target="_blank" rel="noreferrer">Ver bandeja del dirigente rival</a>
+    <a className="managerButtonOutline" href="/demo/live-scoring?view=organizer">Ver bandeja del organizador</a>
+    <a className="managerButtonOutline" href="/demo/live-scoring?view=scorekeeper">Ver bandeja del anotador</a>
+    <a className="managerButtonOutline" href="/demo/live-scoring?view=rival">Ver bandeja del dirigente rival</a>
   </nav>;
 }
 

@@ -15,7 +15,7 @@ export default function TeamSheetInbox({ view }: { view: 'organizer' | 'scorekee
     <article className="managerCard managerStepCard">
       <h2>Bandeja del {view === 'rival' ? 'dirigente rival' : view === 'organizer' ? 'organizador' : 'anotador'}</h2>
       <p>Perfil ficticio de demostración: {userId}. {view === 'rival' ? 'Consulta el partido oficial y las alineaciones en vivo, sin registrar jugadas.' : 'Registra las jugadas y los cambios comunicados en el campo. Ambos managers reciben el resultado en vivo.'}</p>
-      <a href="/demo/live-scoring" className="managerButtonOutline">Volver a la demo del dirigente</a>
+      <a href="/" className="managerButtonOutline">Volver a mi inicio</a>
     </article>
     <OfficialRunScoring
       apiBase={process.env.NEXT_PUBLIC_OFFICIAL_SCORING_API_BASE ?? 'http://localhost:4000/api/official-scoring'}

@@ -1,30 +1,9 @@
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useState } from 'react';
-import { assignBattingOrder, isScorecardState, privateStats as scorecardStats, type PrivateState } from '@playsport/shared';
+import { assignBattingOrder, isScorecardState, privateStats as scorecardStats, platformRoles as roles, platformCoreModules as fanCoreModules, platformRoleExtras as roleExtras, type PlatformRoleId as RoleId, type PlatformModuleId as ModuleId, type PrivateState } from '@playsport/shared';
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 type TabId = 'home' | 'live' | 'events' | 'profile';
-
-type RoleId = 'fan' | 'player' | 'manager' | 'organizer' | 'scorekeeper' | 'scout';
-
-type ModuleId =
-  | 'events-map'
-  | 'live-scoring'
-  | 'standings'
-  | 'news'
-  | 'marketplace'
-  | 'player-career'
-  | 'team-hq'
-  | 'organizer-center'
-  | 'sponsors'
-  | 'scouting';
-
-type RoleItem = {
-  id: RoleId;
-  label: string;
-  summary: string;
-  entitlement: string;
-};
 
 type ModuleItem = {
   id: ModuleId;
@@ -40,45 +19,6 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: 'live', label: 'En Vivo' },
   { id: 'events', label: 'Cartelera' },
   { id: 'profile', label: 'Perfil' }
-];
-
-const roles: RoleItem[] = [
-  {
-    id: 'fan',
-    label: 'Fanatico',
-    summary: 'Sigue partidos, comenta, revisa cartelera y compra en marketplace.',
-    entitlement: 'Solo funciones fanatico'
-  },
-  {
-    id: 'player',
-    label: 'Jugador',
-    summary: 'Incluye funciones fanatico + hoja deportiva y seguimiento personal.',
-    entitlement: 'Fanatico + Jugador'
-  },
-  {
-    id: 'manager',
-    label: 'Manager',
-    summary: 'Prepara el lineup con el roster aprobado y consulta el partido oficial en vivo.',
-    entitlement: 'Fanatico + Manager'
-  },
-  {
-    id: 'organizer',
-    label: 'Organizador',
-    summary: 'Incluye funciones fanatico + torneos y anotacion oficial/legal.',
-    entitlement: 'Fanatico + Organizador'
-  },
-  {
-    id: 'scorekeeper',
-    label: 'Anotador',
-    summary: 'Incluye funciones fanatico + anotacion oficial/legal del partido.',
-    entitlement: 'Fanatico + Anotador'
-  },
-  {
-    id: 'scout',
-    label: 'Scout',
-    summary: 'Incluye funciones fanatico + busqueda avanzada y watchlists.',
-    entitlement: 'Fanatico + Scout'
-  }
 ];
 
 const modules: ModuleItem[] = [
@@ -203,17 +143,6 @@ const modules: ModuleItem[] = [
     ]
   }
 ];
-
-const fanCoreModules: ModuleId[] = ['live-scoring', 'events-map', 'standings', 'news', 'marketplace'];
-
-const roleExtras: Record<RoleId, ModuleId[]> = {
-  fan: [],
-  player: ['player-career'],
-  manager: ['team-hq'],
-  organizer: ['organizer-center', 'sponsors'],
-  scorekeeper: [],
-  scout: ['scouting']
-};
 
 const moduleGroups: Record<TabId, ModuleId[]> = {
   home: ['live-scoring', 'events-map', 'standings', 'news', 'marketplace', 'player-career', 'team-hq', 'organizer-center'],
@@ -2202,8 +2131,12 @@ export default function App() {
         <StatusBar style="light" />
         <ScrollView contentContainerStyle={styles.roleSetupContent}>
           <View style={styles.roleSetupHero}>
-            <Text style={styles.eyebrow}>PLAYSPORT LOGIN DE ROL</Text>
-            <Text style={styles.roleSetupTitle}>Elige como quieres entrar hoy</Text>
+            <Text style={styles.eyebrow}>PLAYSPORT · DEMOSTRACION</Text>
+            <Text style={styles.roleSetupTitle}>Bienvenido a PlaySport</Text>
+            <Text style={styles.roleSetupBody}>
+              Usaras una identidad ficticia. Elige con que perfil quieres entrar hoy.
+              El registro de cuentas y el inicio de sesion reales siguen pendientes.
+            </Text>
             <Text style={styles.roleSetupBody}>
               Este paso define las funciones visibles. La anotacion en vivo oficial es de anotador u
               organizador; el manager entrega su lineup y consulta ese mismo registro oficial.

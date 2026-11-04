@@ -1325,3 +1325,121 @@ h1 {
   margin: 0;
   min-width: 0;
 }
+
+.platformNav {
+	width: min(1120px, 100% - 2rem);
+	margin: 1rem auto 0;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 1rem;
+	flex-wrap: wrap;
+}
+
+.platformBrand {
+	font-size: 1.3rem;
+	font-weight: 800;
+	text-decoration: none;
+	color: var(--text-main);
+}
+
+.platformBrand small {
+	font-size: 0.75rem;
+	color: var(--text-soft);
+}
+
+.platformNav nav {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 0.75rem;
+	font-size: 0.85rem;
+}
+
+.platformNav a {
+	color: var(--text-main);
+}
+
+.platformWelcome,
+.platformRoadmap {
+	margin-top: 1.25rem;
+}
+
+.platformWelcome h2 {
+	margin-bottom: 0.75rem;
+}
+
+.platformProfiles {
+	border: 0;
+	padding: 0;
+	margin: 1.5rem 0;
+	min-width: 0;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+	gap: 0.75rem;
+}
+
+.platformProfiles legend {
+	font-size: 1.14rem;
+	font-weight: 700;
+	margin-bottom: 0.8rem;
+}
+
+.platformProfile {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.65rem;
+	padding: 1rem;
+	border: 2px solid #d3e2ec;
+	border-radius: 14px;
+	cursor: pointer;
+	background: #f9fcff;
+}
+
+.platformProfile[data-selected="true"] {
+	border-color: var(--brand-blue);
+	background: #e8f7fa;
+}
+
+.platformProfile input {
+	margin-top: 0.25rem;
+}
+
+.platformProfile span span {
+	display: block;
+	margin-top: 0.4rem;
+	color: var(--text-soft);
+	font-size: 0.85rem;
+	line-height: 1.4;
+}
+
+.platformModuleStatus {
+	display: inline-block;
+	margin-bottom: 0.75rem;
+	border-radius: 8px;
+	padding: 0.3rem 0.5rem;
+	font-size: 0.75rem;
+	font-weight: 700;
+	color: #72521e;
+	background: #fff1d2;
+}
+
+.platformModuleStatus[data-status="working"] {
+	color: #216f3a;
+	background: #edf9f1;
+}
+
+.platformModuleStatus[data-status="partial"] {
+	color: #17374a;
+	background: #e8f3fb;
+}
+
+.platformError {
+	width: min(1120px, 100% - 2rem);
+	margin: 1rem auto;
+}
+
+.platformRoadmap summary {
+	cursor: pointer;
+	font-weight: 700;
+}
