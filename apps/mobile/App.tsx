@@ -1,5 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { assignBattingOrder, isScorecardState, privateStats as scorecardStats, type PrivateState } from '@playsport/shared';
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 type TabId = 'home' | 'live' | 'events' | 'profile';
@@ -57,7 +58,7 @@ const roles: RoleItem[] = [
   {
     id: 'manager',
     label: 'Manager',
-    summary: 'Incluye funciones fanatico + gestion de roster y anotacion individual no oficial.',
+    summary: 'Prepara el lineup con el roster aprobado y consulta el partido oficial en vivo.',
     entitlement: 'Fanatico + Manager'
   },
   {
@@ -244,8 +245,11 @@ type RosterPlayerView = {
 
 type LineupEntryDraft = {
   identificationNumber: string;
-  battingOrder: number;
+  battingOrder: number | null;
   fieldPosition: string;
+  lineupRole: 'PLAYER' | 'DP' | 'FLEX' | 'EH';
+  jerseyNumber: string;
+  displayName?: string;
 };
 
 type OfficialPlayEventOption = {
@@ -287,6 +291,9 @@ type OfficialPlayByPlaySnapshot = {
     balls: number;
     hitsAllowed: number;
     runsAllowed: number;
+    earnedRuns: number | null;
+    unearnedRuns: number | null;
+    pendingRuns: number | null;
     walksAllowed: number;
     strikeouts: number;
     outsRecorded: number;
@@ -300,33 +307,52 @@ type TeamLineupView = {
   currentBatterIdentificationNumber: string | null;
 };
 
-type BaseRunnersState = {
-  first: string | null;
-  second: string | null;
-  third: string | null;
-};
-
-type ManagerPlayResult = 'OUT' | 'BB' | 'SINGLE' | 'DOUBLE' | 'TRIPLE' | 'HOME_RUN';
-
-type ManagerPlayLogItem = {
-  id: string;
-  teamId: string;
-  batterIdentificationNumber: string;
-  result: ManagerPlayResult;
-  runsScored: number;
-  inning: number;
-};
-
 type ManagerTacticalBatterRow = {
   identificationNumber: string;
   displayName: string;
   plateAppearances: number;
+  atBats: number;
   hits: number;
   strikeouts: number;
   walks: number;
   runs: number;
   rbis: number;
   stolenBases: number;
+};
+
+type ManagerTacticalPlateAppearanceRow = {
+  sequence: number;
+  inning: number;
+  teamId: string;
+  batterIdentificationNumber: string;
+  result: string;
+  description: string;
+  runsScored: number;
+};
+
+type ManagerTacticalErrorRow = {
+  sequence: number;
+  inning: number;
+  description: string;
+};
+
+type ManagerTacticalScorecardRow = {
+  identificationNumber: string;
+  displayName: string;
+  battingOrder: number | null;
+  lineupRole: LineupEntryDraft['lineupRole'];
+  fieldPosition: string;
+  jerseyNumber: string;
+  plateAppearances: number;
+  atBatsCount: number;
+  hits: number;
+  walks: number;
+  strikeouts: number;
+  runs: number;
+  rbis: number;
+  errors: number;
+  atBats: ManagerTacticalPlateAppearanceRow[];
+  errorEvents: ManagerTacticalErrorRow[];
 };
 
 type ManagerTacticalPitcherRow = {
@@ -350,6 +376,7 @@ type ManagerTacticalFieldingRow = {
 
 type ManagerTacticalTurnRow = {
   sequence: number;
+  inning: number;
   offenseTeamId: string;
   type: string;
   description: string;
@@ -360,6 +387,8 @@ type ManagerTacticalSummary = {
   ownTeamId: string;
   rivalTeamId: string | null;
   totalEvents: number;
+  ownScorecard: ManagerTacticalScorecardRow[];
+  rivalScorecard: ManagerTacticalScorecardRow[];
   ownBatting: ManagerTacticalBatterRow[];
   rivalBatting: ManagerTacticalBatterRow[];
   ownPitching: ManagerTacticalPitcherRow[];
@@ -371,7 +400,13 @@ type ManagerTacticalSummary = {
   alerts: string[];
 };
 
-const fieldPositionOptions = ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH'];
+const fieldPositionOptions = ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'OF4', 'SF', 'DH', 'NA'];
+const lineupRoleOptions: Array<{ value: LineupEntryDraft['lineupRole']; label: string }> = [
+  { value: 'PLAYER', label: 'Jugador regular' },
+  { value: 'DP', label: 'DP · bateador asignado' },
+  { value: 'FLEX', label: 'FLEX · defensa sin turno' },
+  { value: 'EH', label: 'EH · bateador extra' }
+];
 const officialPlayEventOptions: OfficialPlayEventOption[] = [
   { value: 'strike', label: 'Strike' },
   { value: 'bola', label: 'Bola' },
@@ -398,19 +433,23 @@ const officialPlayEventOptions: OfficialPlayEventOption[] = [
   { value: 'bola_pasada', label: 'Bola pasada' },
   { value: 'balk', label: 'Balk' },
   { value: 'carrera', label: 'Carrera' },
-  { value: 'error', label: 'Error' }
+  { value: 'corredor_temporal', label: 'Corredor temporal (pitcher/receptor)' },
+  { value: 'error', label: 'Se embasa por error' },
+  { value: 'ERROR_ADVANCE', label: 'Avance por error' },
+  { value: 'RUNNER_ADVANCE', label: 'Avance sin error' },
+  { value: 'DROPPED_FOUL', label: 'Error en foul que prolonga turno' }
 ];
-const managerPlayResultOptions: Array<{ value: ManagerPlayResult; label: string }> = [
-  { value: 'OUT', label: 'Out' },
-  { value: 'BB', label: 'Base por bolas' },
-  { value: 'SINGLE', label: 'Sencillo' },
-  { value: 'DOUBLE', label: 'Doble' },
-  { value: 'TRIPLE', label: 'Triple' },
-  { value: 'HOME_RUN', label: 'Jonron' }
-];
-
 function normalizeCedula(value: string) {
   return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function formatBattingAverage(hits: number, atBats: number) {
+  if (atBats === 0) {
+    return '—';
+  }
+
+  const average = (hits / atBats).toFixed(3);
+  return average.startsWith('0') ? average.slice(1) : average;
 }
 
 function parseApiMessage(payload: unknown) {
@@ -433,6 +472,14 @@ function parseApiMessage(payload: unknown) {
 }
 
 function adaptManagerError(message: string) {
+  if (
+    message.includes('Failed to fetch') ||
+    message.includes('NetworkError') ||
+    message.includes('ERR_CONNECTION_REFUSED')
+  ) {
+    return `No hay conexion con el API de anotacion (${officialScoringApiBase}). Verifica que el servicio este activo y vuelve a intentar.`;
+  }
+
   if (message.includes('ya pertenece al roster del equipo')) {
     return 'Esta cedula ya esta en otro equipo dentro de este mismo torneo. Si puede jugar en otro equipo si es en otro torneo.';
   }
@@ -459,9 +506,8 @@ function getLiveScoringActions(roleId: RoleId): string[] {
 
   if (roleId === 'manager') {
     return [
-      'Registrar jugada privada de mi equipo',
-      'Actualizar pizarra privada de seguimiento',
-      'Guardar anotacion individual del manager'
+      'Consultar pizarra oficial en vivo',
+      'Consultar lineup y estadisticas oficiales'
     ];
   }
 
@@ -474,7 +520,7 @@ function getLiveScoringMode(roleId: RoleId): string {
   }
 
   if (roleId === 'manager') {
-    return 'Modo individual del manager';
+    return 'Consulta oficial del manager';
   }
 
   return 'Modo solo lectura';
@@ -486,7 +532,7 @@ function getLiveScoringRule(roleId: RoleId): string {
   }
 
   if (roleId === 'manager') {
-    return 'Puedes anotar para analisis interno. Esta anotacion no modifica el resultado oficial.';
+    return 'Entrega el lineup desde el roster aprobado y consulta las jugadas y cambios registrados por el anotador u organizador.';
   }
 
   return 'Este perfil solo puede ver la pizarra. La anotacion oficial la realiza un anotador u organizador.';
@@ -498,7 +544,7 @@ function getAccessPolicy(roleId: RoleId): string {
   }
 
   if (roleId === 'manager') {
-    return 'Tienes funciones fanatico + manager. Tu anotacion en vivo es individual y no oficial.';
+    return 'Tienes funciones fanatico + entrega de lineup y consulta oficial en vivo, sin anotacion privada.';
   }
 
   if (officialScoringRoles.includes(roleId)) {
@@ -562,139 +608,6 @@ const initialLiveScoreState: LiveScoreState = {
   updatedAt: new Date().toISOString()
 };
 
-function applyLiveAction(current: LiveScoreState, action: string, actor: string): LiveScoreState {
-  const next: LiveScoreState = {
-    ...current,
-    version: current.version + 1,
-    updatedBy: actor,
-    updatedAt: new Date().toISOString()
-  };
-
-  if (action.includes('turno') || action.includes('jugada')) {
-    next.strikes = Math.min(2, current.strikes + 1);
-    next.status = current.status === 'scheduled' ? 'in_progress' : current.status;
-    next.lastPlay = action;
-    return next;
-  }
-
-  if (action.includes('pizarra')) {
-    next.homeScore = current.homeScore + 1;
-    next.balls = 0;
-    next.strikes = 0;
-    next.status = 'in_progress';
-    next.lastPlay = action;
-    return next;
-  }
-
-  if (action.includes('Cerrar juego') || action.includes('resultado legal')) {
-    next.status = 'final';
-    next.lastPlay = action;
-    return next;
-  }
-
-  next.lastPlay = action;
-  return next;
-}
-
-function resolveManagerPlay(
-  bases: BaseRunnersState,
-  batterIdentificationNumber: string,
-  result: ManagerPlayResult
-) {
-  if (result === 'OUT') {
-    return {
-      nextBases: { ...bases },
-      runsScored: 0
-    };
-  }
-
-  if (result === 'BB') {
-    if (!bases.first) {
-      return {
-        nextBases: {
-          first: batterIdentificationNumber,
-          second: bases.second,
-          third: bases.third
-        },
-        runsScored: 0
-      };
-    }
-
-    if (!bases.second) {
-      return {
-        nextBases: {
-          first: batterIdentificationNumber,
-          second: bases.first,
-          third: bases.third
-        },
-        runsScored: 0
-      };
-    }
-
-    if (!bases.third) {
-      return {
-        nextBases: {
-          first: batterIdentificationNumber,
-          second: bases.first,
-          third: bases.second
-        },
-        runsScored: 0
-      };
-    }
-
-    return {
-      nextBases: {
-        first: batterIdentificationNumber,
-        second: bases.first,
-        third: bases.second
-      },
-      runsScored: 1
-    };
-  }
-
-  if (result === 'SINGLE') {
-    return {
-      nextBases: {
-        first: batterIdentificationNumber,
-        second: bases.first,
-        third: bases.second
-      },
-      runsScored: bases.third ? 1 : 0
-    };
-  }
-
-  if (result === 'DOUBLE') {
-    return {
-      nextBases: {
-        first: null,
-        second: batterIdentificationNumber,
-        third: bases.first
-      },
-      runsScored: (bases.second ? 1 : 0) + (bases.third ? 1 : 0)
-    };
-  }
-
-  if (result === 'TRIPLE') {
-    return {
-      nextBases: {
-        first: null,
-        second: null,
-        third: batterIdentificationNumber
-      },
-      runsScored: (bases.first ? 1 : 0) + (bases.second ? 1 : 0) + (bases.third ? 1 : 0)
-    };
-  }
-
-  return {
-    nextBases: {
-      first: null,
-      second: null,
-      third: null
-    },
-    runsScored: (bases.first ? 1 : 0) + (bases.second ? 1 : 0) + (bases.third ? 1 : 0) + 1
-  };
-}
-
 export default function App() {
   const [sessionRoleId, setSessionRoleId] = useState<RoleId | null>(null);
   const [roleDraft, setRoleDraft] = useState<RoleId>('fan');
@@ -702,38 +615,22 @@ export default function App() {
   const [activeModuleId, setActiveModuleId] = useState<ModuleId | null>(null);
   const [lastAction, setLastAction] = useState('');
   const [officialLiveState, setOfficialLiveState] = useState<LiveScoreState>(initialLiveScoreState);
-  const [managerPrivateLiveState, setManagerPrivateLiveState] = useState<LiveScoreState>({
-    ...initialLiveScoreState,
-    updatedBy: 'Manager',
-    lastPlay: 'Sin anotaciones privadas'
-  });
+  const [managerOfficialScorecard, setManagerOfficialScorecard] = useState<PrivateState | null>(null);
+  const [managerOfficialError, setManagerOfficialError] = useState('');
   const [managerTournamentId, setManagerTournamentId] = useState('tour-global-1');
   const [managerTeamId, setManagerTeamId] = useState('team-A');
   const [managerGameId, setManagerGameId] = useState('game-global-1');
   const [managerProfileId, setManagerProfileId] = useState('mgr-A');
-  const [managerPlayerNameDraft, setManagerPlayerNameDraft] = useState('');
-  const [managerPlayerCedulaDraft, setManagerPlayerCedulaDraft] = useState('');
-  const [managerRepresentativeCedulaDraft, setManagerRepresentativeCedulaDraft] = useState('');
-  const [managerIsMinorDraft, setManagerIsMinorDraft] = useState(false);
-  const [managerRosterCedulaDraft, setManagerRosterCedulaDraft] = useState('');
   const [managerRosterCedulas, setManagerRosterCedulas] = useState<string[]>([]);
   const [managerRosterPlayers, setManagerRosterPlayers] = useState<RosterPlayerView[]>([]);
   const [managerLineupCedulaDraft, setManagerLineupCedulaDraft] = useState('');
-  const [managerLineupBattingOrderDraft, setManagerLineupBattingOrderDraft] = useState('1');
   const [managerLineupFieldPositionDraft, setManagerLineupFieldPositionDraft] = useState('P');
+  const [managerLineupRoleDraft, setManagerLineupRoleDraft] = useState<LineupEntryDraft['lineupRole']>('PLAYER');
+  const [organizerCourtesyRunnerSourceDraft, setOrganizerCourtesyRunnerSourceDraft] = useState<'BENCH' | 'ROSTER'>('BENCH');
+  const [managerLineupJerseyNumberDraft, setManagerLineupJerseyNumberDraft] = useState('');
   const [managerLineupEntries, setManagerLineupEntries] = useState<LineupEntryDraft[]>([]);
   const [managerOwnLineupView, setManagerOwnLineupView] = useState<TeamLineupView | null>(null);
   const [managerRivalLineupView, setManagerRivalLineupView] = useState<TeamLineupView | null>(null);
-  const [managerLiveOffenseTeamId, setManagerLiveOffenseTeamId] = useState('');
-  const [managerLiveBatterCedula, setManagerLiveBatterCedula] = useState('');
-  const [managerLiveResultDraft, setManagerLiveResultDraft] = useState<ManagerPlayResult>('OUT');
-  const [managerBaseRunners, setManagerBaseRunners] = useState<BaseRunnersState>({
-    first: null,
-    second: null,
-    third: null
-  });
-  const [managerBattingIndexByTeam, setManagerBattingIndexByTeam] = useState<Record<string, number>>({});
-  const [managerPlayLog, setManagerPlayLog] = useState<ManagerPlayLogItem[]>([]);
   const [managerTacticalSummary, setManagerTacticalSummary] = useState<ManagerTacticalSummary | null>(null);
   const [managerTacticalLoading, setManagerTacticalLoading] = useState(false);
   const [managerContextReady, setManagerContextReady] = useState(false);
@@ -744,19 +641,56 @@ export default function App() {
   const [officialActorId, setOfficialActorId] = useState('score-1');
   const [officialOffenseTeamIdDraft, setOfficialOffenseTeamIdDraft] = useState('');
   const [officialBatterCedulaDraft, setOfficialBatterCedulaDraft] = useState('');
-  const [officialPitcherCedulaDraft, setOfficialPitcherCedulaDraft] = useState('');
   const [officialRunnerCedulaDraft, setOfficialRunnerCedulaDraft] = useState('');
   const [officialFielderCedulaDraft, setOfficialFielderCedulaDraft] = useState('');
   const [officialFromBaseDraft, setOfficialFromBaseDraft] = useState('');
   const [officialToBaseDraft, setOfficialToBaseDraft] = useState('');
   const [officialRunsScoredDraft, setOfficialRunsScoredDraft] = useState('');
   const [officialOutsRecordedDraft, setOfficialOutsRecordedDraft] = useState('');
+  const [officialErrorOutsDraft, setOfficialErrorOutsDraft] = useState('');
   const [officialEventTypeDraft, setOfficialEventTypeDraft] = useState('strike');
   const [officialUiStatus, setOfficialUiStatus] = useState<UiStatus>({ kind: 'idle', message: '' });
   const [officialSubmitting, setOfficialSubmitting] = useState(false);
   const [officialPlayByPlaySnapshot, setOfficialPlayByPlaySnapshot] = useState<OfficialPlayByPlaySnapshot | null>(null);
 
   const currentRoleId: RoleId = sessionRoleId ?? roleDraft;
+  useEffect(() => {
+    if (currentRoleId !== 'manager' || activeModuleId !== 'live-scoring' || !managerContextReady) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const controller = new AbortController();
+    setManagerOfficialScorecard(null);
+    const refresh = async () => {
+      try {
+        const response = await fetch(`${officialScoringApiBase}/games/${encodeURIComponent(managerGameId.trim())}/state?tournamentId=${encodeURIComponent(managerTournamentId.trim())}`, { signal: controller.signal });
+        const body: unknown = await response.json();
+        if (!response.ok || !body || typeof body !== 'object' || !('state' in body) ||
+            !body.state || typeof body.state !== 'object' || !('playByPlay' in body) ||
+            !body.playByPlay || typeof body.playByPlay !== 'object' || !('scorecard' in body.playByPlay) ||
+            !isScorecardState(body.playByPlay.scorecard)) throw new Error('No se pudo leer el partido oficial. Revisa la conexion y el partido asignado.');
+        const scorecard = body.playByPlay.scorecard;
+        const state = body.state;
+        if (active) {
+          setManagerOfficialScorecard(scorecard);
+          setOfficialLiveState((previous) => ({
+            ...previous, inning: scorecard.inning, outs: scorecard.outs, balls: scorecard.balls, strikes: scorecard.strikes,
+            homeScore: scorecard.scores.home, awayScore: scorecard.scores.away,
+            status: scorecard.finished ? 'final' : 'in_progress',
+            lastPlay: 'lastPlay' in state && typeof state.lastPlay === 'string' ? state.lastPlay : 'Sin jugadas oficiales',
+            version: 'officialVersion' in state && typeof state.officialVersion === 'number' ? state.officialVersion : previous.version,
+            updatedBy: 'Anotador / organizador'
+          }));
+          setManagerOfficialError('');
+        }
+      } catch (failure) {
+        if (active) setManagerOfficialError(failure instanceof Error ? failure.message : 'No se pudo actualizar la pizarra oficial.');
+      } finally {
+        if (active) timer = setTimeout(() => { void refresh(); }, 3000);
+      }
+    };
+    void refresh();
+    return () => { active = false; controller.abort(); clearTimeout(timer); };
+  }, [currentRoleId, activeModuleId, managerContextReady, managerGameId, managerTournamentId]);
 
   const activeRole = useMemo(
     () => roles.find((role) => role.id === currentRoleId) ?? roles[0],
@@ -810,12 +744,11 @@ export default function App() {
         void loadOfficialPlayByPlayFromApi();
       }
 
-      setOfficialLiveState((current) => applyLiveAction(current, action, activeRole.label));
       return;
     }
 
     if (currentRoleId === 'manager') {
-      setManagerPrivateLiveState((current) => applyLiveAction(current, action, activeRole.label));
+      setLastAction('La pizarra se actualiza con las anotaciones oficiales; este perfil no registra jugadas.');
     }
   };
 
@@ -828,11 +761,8 @@ export default function App() {
       setManagerContextReady(false);
       setManagerOwnLineupView(null);
       setManagerRivalLineupView(null);
-      setManagerLiveOffenseTeamId('');
-      setManagerLiveBatterCedula('');
-      setManagerBattingIndexByTeam({});
-      setManagerBaseRunners({ first: null, second: null, third: null });
-      setManagerPlayLog([]);
+      setManagerOfficialScorecard(null);
+      setManagerOfficialError('');
       setManagerTacticalSummary(null);
       setManagerTacticalLoading(false);
       setManagerUiStatus({
@@ -851,66 +781,19 @@ export default function App() {
     setManagerContextReady(false);
     setManagerOwnLineupView(null);
     setManagerRivalLineupView(null);
-    setManagerLiveOffenseTeamId('');
-    setManagerLiveBatterCedula('');
-    setManagerBattingIndexByTeam({});
-    setManagerBaseRunners({ first: null, second: null, third: null });
-    setManagerPlayLog([]);
+    setManagerOfficialScorecard(null);
+    setManagerOfficialError('');
     setManagerTacticalSummary(null);
     setManagerTacticalLoading(false);
   };
-
-  const managerRosterNamesByCedula = useMemo(() => {
-    const map = new Map<string, string>();
-
-    for (const player of managerRosterPlayers) {
-      map.set(player.identificationNumber, player.displayName);
-    }
-
-    return map;
-  }, [managerRosterPlayers]);
-
-  const managerLiveOffenseLineup = useMemo(() => {
-    if (!managerLiveOffenseTeamId) {
-      return [] as LineupEntryDraft[];
-    }
-
-    if (managerOwnLineupView && managerOwnLineupView.teamId === managerLiveOffenseTeamId) {
-      return managerOwnLineupView.entries;
-    }
-
-    if (managerRivalLineupView && managerRivalLineupView.teamId === managerLiveOffenseTeamId) {
-      return managerRivalLineupView.entries;
-    }
-
-    return [] as LineupEntryDraft[];
-  }, [managerLiveOffenseTeamId, managerOwnLineupView, managerRivalLineupView]);
-
-  const managerLiveCurrentBatter = useMemo(() => {
-    if (!managerLiveOffenseTeamId || managerLiveOffenseLineup.length === 0) {
-      return null;
-    }
-
-    const lineupIndex = managerBattingIndexByTeam[managerLiveOffenseTeamId] ?? 0;
-    const resolvedIndex = lineupIndex % managerLiveOffenseLineup.length;
-    return managerLiveOffenseLineup[resolvedIndex]?.identificationNumber ?? null;
-  }, [managerBattingIndexByTeam, managerLiveOffenseLineup, managerLiveOffenseTeamId]);
-
-  const managerLiveResultLabel = useMemo(() => {
-    const found = managerPlayResultOptions.find((item) => item.value === managerLiveResultDraft);
-    return found?.label ?? managerLiveResultDraft;
-  }, [managerLiveResultDraft]);
 
   const updateManagerTournamentId = (value: string) => {
     setManagerTournamentId(value);
     setManagerContextReady(false);
     setManagerOwnLineupView(null);
     setManagerRivalLineupView(null);
-    setManagerLiveOffenseTeamId('');
-    setManagerLiveBatterCedula('');
-    setManagerBattingIndexByTeam({});
-    setManagerBaseRunners({ first: null, second: null, third: null });
-    setManagerPlayLog([]);
+    setManagerOfficialScorecard(null);
+    setManagerOfficialError('');
     setManagerTacticalSummary(null);
     setManagerTacticalLoading(false);
   };
@@ -920,11 +803,8 @@ export default function App() {
     setManagerContextReady(false);
     setManagerOwnLineupView(null);
     setManagerRivalLineupView(null);
-    setManagerLiveOffenseTeamId('');
-    setManagerLiveBatterCedula('');
-    setManagerBattingIndexByTeam({});
-    setManagerBaseRunners({ first: null, second: null, third: null });
-    setManagerPlayLog([]);
+    setManagerOfficialScorecard(null);
+    setManagerOfficialError('');
     setManagerTacticalSummary(null);
     setManagerTacticalLoading(false);
   };
@@ -934,11 +814,8 @@ export default function App() {
     setManagerContextReady(false);
     setManagerOwnLineupView(null);
     setManagerRivalLineupView(null);
-    setManagerLiveOffenseTeamId('');
-    setManagerLiveBatterCedula('');
-    setManagerBattingIndexByTeam({});
-    setManagerBaseRunners({ first: null, second: null, third: null });
-    setManagerPlayLog([]);
+    setManagerOfficialScorecard(null);
+    setManagerOfficialError('');
     setManagerTacticalSummary(null);
     setManagerTacticalLoading(false);
   };
@@ -948,11 +825,8 @@ export default function App() {
     setManagerContextReady(false);
     setManagerOwnLineupView(null);
     setManagerRivalLineupView(null);
-    setManagerLiveOffenseTeamId('');
-    setManagerLiveBatterCedula('');
-    setManagerBattingIndexByTeam({});
-    setManagerBaseRunners({ first: null, second: null, third: null });
-    setManagerPlayLog([]);
+    setManagerOfficialScorecard(null);
+    setManagerOfficialError('');
     setManagerTacticalSummary(null);
     setManagerTacticalLoading(false);
   };
@@ -1148,6 +1022,9 @@ export default function App() {
               balls: Number((item as { balls?: unknown }).balls ?? 0),
               hitsAllowed: Number((item as { hitsAllowed?: unknown }).hitsAllowed ?? 0),
               runsAllowed: Number((item as { runsAllowed?: unknown }).runsAllowed ?? 0),
+              earnedRuns: 'earnedRuns' in item && typeof item.earnedRuns === 'number' ? item.earnedRuns : null,
+              unearnedRuns: 'unearnedRuns' in item && typeof item.unearnedRuns === 'number' ? item.unearnedRuns : null,
+              pendingRuns: 'pendingRuns' in item && typeof item.pendingRuns === 'number' ? item.pendingRuns : null,
               walksAllowed: Number((item as { walksAllowed?: unknown }).walksAllowed ?? 0),
               strikeouts: Number((item as { strikeouts?: unknown }).strikeouts ?? 0),
               outsRecorded: Number((item as { outsRecorded?: unknown }).outsRecorded ?? 0)
@@ -1231,6 +1108,28 @@ export default function App() {
     }
   };
 
+  const saveTournamentRules = async () => {
+    if (currentRoleId !== 'organizer') {
+      setOfficialUiStatus({ kind: 'error', message: 'Solo el organizador puede configurar reglas.' });
+      return;
+    }
+    setOfficialSubmitting(true);
+    try {
+      await postOfficialScoring(`tournaments/${officialTournamentId.trim()}/rules`, {
+        organizerId: officialActorId.trim(),
+        courtesyRunnerSource: organizerCourtesyRunnerSourceDraft
+      });
+      setOfficialUiStatus({ kind: 'success', message: 'Regla guardada para todos los juegos del torneo.' });
+    } catch (error) {
+      setOfficialUiStatus({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'No se pudo guardar la regla del torneo.'
+      });
+    } finally {
+      setOfficialSubmitting(false);
+    }
+  };
+
   const submitOfficialPlayEvent = async () => {
     const tournamentId = officialTournamentId.trim();
     const gameId = officialGameId.trim();
@@ -1244,6 +1143,12 @@ export default function App() {
       return;
     }
 
+    const errorEvent = ['error', 'ERROR_ADVANCE'].includes(officialEventTypeDraft);
+    if (errorEvent && !/^[0-3]$/.test(officialErrorOutsDraft) ||
+        officialEventTypeDraft === 'ERROR_ADVANCE' && Number(officialErrorOutsDraft) > 1) {
+      setOfficialUiStatus({ kind: 'error', message: 'Indica los outs que evitó el error: de 0 a 3; sobre un corredor, solo 0 o 1.' });
+      return;
+    }
     setOfficialSubmitting(true);
     setOfficialUiStatus({ kind: 'idle', message: '' });
 
@@ -1252,18 +1157,19 @@ export default function App() {
         tournamentId,
         actorId,
         actorRole: currentRoleId === 'organizer' ? 'organizer' : 'scorekeeper',
+        expectedOfficialVersion: officialLiveState.version,
         patch: {},
         playEvent: {
           type: officialEventTypeDraft,
           teamId: officialOffenseTeamIdDraft.trim() || undefined,
           batterIdentificationNumber: officialBatterCedulaDraft.trim() || undefined,
-          pitcherIdentificationNumber: officialPitcherCedulaDraft.trim() || undefined,
           runnerIdentificationNumber: officialRunnerCedulaDraft.trim() || undefined,
           fielderIdentificationNumber: officialFielderCedulaDraft.trim() || undefined,
           fromBase: parseOptionalBase(officialFromBaseDraft),
           toBase: parseOptionalBase(officialToBaseDraft),
           runsScored: parseOptionalBase(officialRunsScoredDraft),
-          outsRecorded: parseOptionalBase(officialOutsRecordedDraft)
+          outsRecorded: parseOptionalBase(officialOutsRecordedDraft),
+          errorOuts: errorEvent ? Number(officialErrorOutsDraft) : officialEventTypeDraft === 'DROPPED_FOUL' ? 1 : undefined
         }
       });
 
@@ -1369,9 +1275,13 @@ export default function App() {
       setManagerRosterCedulas(rosterIds);
       setManagerRosterPlayers(rosterPlayers);
       setManagerLineupEntries((current) =>
-        current
+        assignBattingOrder(current
           .filter((entry) => rosterIds.includes(entry.identificationNumber))
-          .sort((a, b) => a.battingOrder - b.battingOrder)
+          .sort(
+            (a, b) =>
+              (a.battingOrder ?? Number.MAX_SAFE_INTEGER) -
+              (b.battingOrder ?? Number.MAX_SAFE_INTEGER)
+          ))
       );
 
       if (!opts?.silent) {
@@ -1380,6 +1290,8 @@ export default function App() {
           message: `Contexto activado. Roster oficial cargado para ${context.teamId} (${rosterIds.length} jugador(es)).`
         });
       }
+
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo revisar el roster oficial.';
 
@@ -1395,10 +1307,11 @@ export default function App() {
           });
         }
 
-        return;
+        return true;
       }
 
       setManagerUiStatus({ kind: 'error', message: adaptManagerError(message) });
+      return false;
     } finally {
       setManagerSubmitting(false);
     }
@@ -1415,9 +1328,9 @@ export default function App() {
       return;
     }
 
-    setManagerContextReady(true);
     setManagerUiStatus({ kind: 'idle', message: '' });
-    await loadRosterFromContext(context);
+    const contextLoaded = await loadRosterFromContext(context);
+    setManagerContextReady(contextLoaded);
   };
 
   const parseTeamLineupView = (row: unknown): TeamLineupView | null => {
@@ -1449,7 +1362,9 @@ export default function App() {
           .map((identificationNumber, index) => ({
             identificationNumber,
             battingOrder: index + 1,
-            fieldPosition: 'NA'
+            fieldPosition: 'NA',
+            lineupRole: 'PLAYER' as const,
+            jerseyNumber: ''
           }))
       : [];
 
@@ -1471,27 +1386,55 @@ export default function App() {
           typeof identificationSource === 'string' ? normalizeCedula(identificationSource) : '';
 
         const battingOrderRaw = (entry as { battingOrder?: unknown }).battingOrder;
+        const lineupRoleRaw = (entry as { lineupRole?: unknown }).lineupRole;
+        const lineupRole =
+          lineupRoleRaw === 'DP' || lineupRoleRaw === 'FLEX' || lineupRoleRaw === 'EH'
+            ? lineupRoleRaw
+            : 'PLAYER';
         const battingOrder =
-          typeof battingOrderRaw === 'number'
-            ? battingOrderRaw
-            : Number.parseInt(String(battingOrderRaw ?? ''), 10);
+          battingOrderRaw === null || (lineupRole === 'FLEX' && battingOrderRaw === undefined)
+            ? null
+            : typeof battingOrderRaw === 'number'
+              ? battingOrderRaw
+              : Number.parseInt(String(battingOrderRaw ?? ''), 10);
 
         const fieldPositionSource = (entry as { fieldPosition?: unknown }).fieldPosition;
         const fieldPosition =
           typeof fieldPositionSource === 'string' ? fieldPositionSource.trim().toUpperCase() : 'NA';
+        const jerseyNumberSource = (entry as { jerseyNumber?: unknown }).jerseyNumber;
+        const jerseyNumber =
+          typeof jerseyNumberSource === 'string' ? jerseyNumberSource.trim() : '';
+        const player = (entry as { player?: unknown }).player;
+        const displayNameSource =
+          player && typeof player === 'object'
+            ? (player as { displayName?: unknown }).displayName
+            : undefined;
+        const displayName =
+          typeof displayNameSource === 'string' ? displayNameSource.trim() : '';
 
-        if (identificationNumber.length < 4 || !Number.isInteger(battingOrder) || battingOrder < 1) {
+        if (
+          identificationNumber.length < 4 ||
+          (lineupRole === 'FLEX'
+            ? battingOrder !== null
+            : battingOrder === null || !Number.isInteger(battingOrder) || battingOrder < 1)
+        ) {
           return null;
         }
 
         return {
           identificationNumber,
           battingOrder,
-          fieldPosition: fieldPosition || 'NA'
+          fieldPosition: fieldPosition || 'NA',
+          lineupRole,
+          jerseyNumber,
+          ...(displayName ? { displayName } : {})
         } as LineupEntryDraft;
       })
       .filter((entry): entry is LineupEntryDraft => Boolean(entry))
-      .sort((a, b) => a.battingOrder - b.battingOrder);
+      .sort(
+        (a, b) =>
+          (a.battingOrder ?? Number.MAX_SAFE_INTEGER) - (b.battingOrder ?? Number.MAX_SAFE_INTEGER)
+      );
 
     const currentBatterSource =
       (row as { currentBatterIdentificationNumber?: unknown }).currentBatterIdentificationNumber ??
@@ -1536,44 +1479,6 @@ export default function App() {
       if (ownLineup && ownLineup.entries.length > 0) {
         setManagerLineupEntries(ownLineup.entries);
       }
-
-      const initialIndexes: Record<string, number> = {};
-      for (const lineup of lineupViews) {
-        const foundIndex = lineup.currentBatterIdentificationNumber
-          ? lineup.entries.findIndex(
-              (entry) => entry.identificationNumber === lineup.currentBatterIdentificationNumber
-            )
-          : -1;
-
-        initialIndexes[lineup.teamId] = foundIndex >= 0 ? foundIndex : 0;
-      }
-
-      setManagerBattingIndexByTeam(initialIndexes);
-
-      const keepsCurrentOffense =
-        managerLiveOffenseTeamId.length > 0 && Boolean(initialIndexes[managerLiveOffenseTeamId] !== undefined);
-
-      const nextOffenseTeamId = keepsCurrentOffense
-        ? managerLiveOffenseTeamId
-        : ownLineup?.teamId ?? rivalLineup?.teamId ?? '';
-
-      setManagerLiveOffenseTeamId(nextOffenseTeamId);
-
-      const nextOffenseLineup =
-        nextOffenseTeamId === ownLineup?.teamId
-          ? ownLineup?.entries ?? []
-          : nextOffenseTeamId === rivalLineup?.teamId
-            ? rivalLineup?.entries ?? []
-            : [];
-
-      const nextOffenseIndex = initialIndexes[nextOffenseTeamId] ?? 0;
-      const nextBatter =
-        nextOffenseLineup.length > 0
-          ? nextOffenseLineup[nextOffenseIndex % nextOffenseLineup.length]?.identificationNumber ?? ''
-          : '';
-
-      setManagerLiveBatterCedula(nextBatter);
-      setManagerBaseRunners({ first: null, second: null, third: null });
 
       if (!opts?.silent) {
         setManagerUiStatus({
@@ -1681,6 +1586,7 @@ export default function App() {
                 identificationNumber,
                 displayName: getDisplayName(row, identificationNumber),
                 plateAppearances: parseNumber(row.plateAppearances),
+                atBats: parseNumber(row.atBats),
                 hits: parseNumber(row.hits),
                 strikeouts: parseNumber(row.strikeouts),
                 walks: parseNumber(row.walks),
@@ -1763,7 +1669,11 @@ export default function App() {
 
               const row = item as Record<string, unknown>;
               const offenseTeamId =
-                typeof row.offenseTeamId === 'string' ? row.offenseTeamId.trim() : '';
+                typeof row.battingTeamId === 'string'
+                  ? row.battingTeamId.trim()
+                  : typeof row.offenseTeamId === 'string'
+                    ? row.offenseTeamId.trim()
+                    : '';
 
               if (!offenseTeamId) {
                 return null;
@@ -1776,6 +1686,7 @@ export default function App() {
 
               return {
                 sequence: parseNumber(row.sequence),
+                inning: parseNumber(row.inning),
                 offenseTeamId,
                 type: typeof row.type === 'string' ? row.type : 'N/A',
                 description: typeof row.description === 'string' ? row.description : 'Jugada registrada',
@@ -1784,6 +1695,134 @@ export default function App() {
             })
             .filter((item): item is ManagerTacticalTurnRow => Boolean(item))
         : [];
+
+      const plateAppearancesRaw = (playByPlayRaw as { plateAppearances?: unknown }).plateAppearances;
+      const plateAppearances: ManagerTacticalPlateAppearanceRow[] = Array.isArray(plateAppearancesRaw)
+        ? plateAppearancesRaw
+            .map((item) => {
+              if (!item || typeof item !== 'object') {
+                return null;
+              }
+
+              const row = item as Record<string, unknown>;
+              const batterIdentificationNumber =
+                typeof row.batterIdentificationNumber === 'string'
+                  ? normalizeCedula(row.batterIdentificationNumber)
+                  : '';
+              const offenseTeamId =
+                typeof row.offenseTeamId === 'string' ? row.offenseTeamId.trim() : '';
+
+              if (!batterIdentificationNumber || !offenseTeamId) {
+                return null;
+              }
+
+              return {
+                sequence: parseNumber(row.sequence),
+                inning: parseNumber(row.inning),
+                teamId: offenseTeamId,
+                batterIdentificationNumber,
+                result: typeof row.result === 'string' ? row.result : 'N/A',
+                description:
+                  typeof row.description === 'string' ? row.description : 'Turno registrado',
+                runsScored: parseNumber(row.runsScored)
+              };
+            })
+            .filter(
+              (
+                item
+              ): item is ManagerTacticalPlateAppearanceRow => Boolean(item)
+            )
+        : [];
+
+      const fieldingErrorsRaw = (playByPlayRaw as { fieldingErrors?: unknown }).fieldingErrors;
+      const fieldingErrors = Array.isArray(fieldingErrorsRaw)
+        ? fieldingErrorsRaw
+            .map((item) => {
+              if (!item || typeof item !== 'object') {
+                return null;
+              }
+
+              const row = item as Record<string, unknown>;
+              const fielderIdentificationNumber =
+                typeof row.fielderIdentificationNumber === 'string'
+                  ? normalizeCedula(row.fielderIdentificationNumber)
+                  : '';
+
+              if (!fielderIdentificationNumber) {
+                return null;
+              }
+
+              return {
+                sequence: parseNumber(row.sequence),
+                inning: parseNumber(row.inning),
+                teamId: typeof row.defenseTeamId === 'string' ? row.defenseTeamId : '',
+                fielderIdentificationNumber,
+                description:
+                  typeof row.description === 'string' ? row.description : 'Error defensivo'
+              };
+            })
+            .filter(
+              (
+                item
+              ): item is {
+                sequence: number;
+                inning: number;
+                teamId: string;
+                fielderIdentificationNumber: string;
+                description: string;
+              } => Boolean(item)
+            )
+        : [];
+
+      const buildScorecard = (lineup: TeamLineupView | null): ManagerTacticalScorecardRow[] => {
+        if (!lineup) {
+          return [];
+        }
+
+        return lineup.entries.map((entry) => {
+          const identificationNumber = entry.identificationNumber;
+          const batting = batterRows.find((row) => row.identificationNumber === identificationNumber);
+          const fielding = fieldingRows.find((row) => row.identificationNumber === identificationNumber);
+          const atBats = plateAppearances
+            .filter(
+              (turn) =>
+                turn.teamId === lineup.teamId && turn.batterIdentificationNumber === identificationNumber
+            )
+            .sort((left, right) => left.sequence - right.sequence);
+          const errorEvents = fieldingErrors
+            .filter(
+              (error) =>
+                error.teamId === lineup.teamId &&
+                error.fielderIdentificationNumber === identificationNumber
+            )
+            .sort((left, right) => left.sequence - right.sequence);
+
+          return {
+            identificationNumber,
+            displayName:
+              entry.displayName ??
+              batting?.displayName ??
+              fielding?.displayName ??
+              managerRosterPlayers.find((player) => player.identificationNumber === identificationNumber)
+                ?.displayName ??
+              identificationNumber,
+            battingOrder: entry.battingOrder,
+            lineupRole: entry.lineupRole,
+            fieldPosition: entry.fieldPosition,
+            jerseyNumber: entry.jerseyNumber,
+            plateAppearances: batting?.plateAppearances ?? atBats.length,
+            atBatsCount: batting?.atBats ?? 0,
+            hits: batting?.hits ?? 0,
+            walks: batting?.walks ?? 0,
+            strikeouts: batting?.strikeouts ?? 0,
+            runs: batting?.runs ?? 0,
+            rbis: batting?.rbis ?? 0,
+            errors: fielding?.errors ?? errorEvents.length,
+            atBats,
+            errorEvents
+          };
+        });
+      };
 
       const ownBatting = batterRows
         .filter((row) => ownPlayerIds.has(row.identificationNumber))
@@ -1862,6 +1901,8 @@ export default function App() {
         ownTeamId: ownLineup.teamId,
         rivalTeamId: rivalLineup?.teamId ?? null,
         totalEvents,
+        ownScorecard: buildScorecard(ownLineup),
+        rivalScorecard: buildScorecard(rivalLineup),
         ownBatting,
         rivalBatting,
         ownPitching,
@@ -1929,199 +1970,6 @@ export default function App() {
     setActiveModuleId('live-scoring');
   };
 
-  const selectManagerLiveOffenseTeam = (teamId: string) => {
-    const normalized = teamId.trim();
-    if (!normalized) {
-      return;
-    }
-
-    setManagerLiveOffenseTeamId(normalized);
-
-    const lineup =
-      normalized === managerOwnLineupView?.teamId
-        ? managerOwnLineupView.entries
-        : normalized === managerRivalLineupView?.teamId
-          ? managerRivalLineupView.entries
-          : [];
-
-    const index = managerBattingIndexByTeam[normalized] ?? 0;
-    const batter = lineup.length > 0 ? lineup[index % lineup.length]?.identificationNumber ?? '' : '';
-    setManagerLiveBatterCedula(batter);
-  };
-
-  const recordManagerLivePlay = () => {
-    if (!managerContextReady) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Activa primero el contexto de manager para anotar jugada a jugada.'
-      });
-      return;
-    }
-
-    const context = buildManagerContext();
-    const offenseTeamId = managerLiveOffenseTeamId || context.teamId;
-
-    const offenseLineup =
-      offenseTeamId === managerOwnLineupView?.teamId
-        ? managerOwnLineupView.entries
-        : offenseTeamId === managerRivalLineupView?.teamId
-          ? managerRivalLineupView.entries
-          : [];
-
-    if (offenseLineup.length === 0) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Primero carga lineups del juego para poder anotar jugada por jugador.'
-      });
-      return;
-    }
-
-    const battingIndex = managerBattingIndexByTeam[offenseTeamId] ?? 0;
-    const expectedBatter = offenseLineup[battingIndex % offenseLineup.length]?.identificationNumber ?? '';
-
-    if (!expectedBatter) {
-      setManagerUiStatus({ kind: 'error', message: 'No se pudo determinar el bateador actual del lineup.' });
-      return;
-    }
-
-    const selectedBatter = normalizeCedula(managerLiveBatterCedula);
-    const batterIdentificationNumber = selectedBatter || expectedBatter;
-
-    if (batterIdentificationNumber !== expectedBatter) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: `Turno esperado: ${expectedBatter}. Ajusta el orden o registra el bateador correcto.`
-      });
-      return;
-    }
-
-    const playResolution = resolveManagerPlay(managerBaseRunners, batterIdentificationNumber, managerLiveResultDraft);
-
-    let nextOuts = managerPrivateLiveState.outs;
-    let nextInning = managerPrivateLiveState.inning;
-    let nextOffenseTeamId = offenseTeamId;
-    let nextBases = playResolution.nextBases;
-
-    if (managerLiveResultDraft === 'OUT') {
-      nextOuts += 1;
-
-      if (nextOuts >= 3) {
-        nextOuts = 0;
-        nextInning = managerPrivateLiveState.inning + 1;
-        nextBases = { first: null, second: null, third: null };
-
-        if (managerOwnLineupView && managerRivalLineupView) {
-          nextOffenseTeamId =
-            offenseTeamId === managerOwnLineupView.teamId
-              ? managerRivalLineupView.teamId
-              : managerOwnLineupView.teamId;
-        }
-      }
-    }
-
-    const isOwnOffenseTeam = offenseTeamId === context.teamId;
-
-    setManagerPrivateLiveState((current) => ({
-      ...current,
-      inning: nextInning,
-      outs: nextOuts,
-      balls: 0,
-      strikes: 0,
-      homeScore: current.homeScore + (isOwnOffenseTeam ? playResolution.runsScored : 0),
-      awayScore: current.awayScore + (isOwnOffenseTeam ? 0 : playResolution.runsScored),
-      status: 'in_progress',
-      lastPlay: `${offenseTeamId} ${batterIdentificationNumber} ${managerLiveResultLabel}`,
-      version: current.version + 1,
-      updatedBy: activeRole.label,
-      updatedAt: new Date().toISOString()
-    }));
-
-    const nextCurrentIndex = (battingIndex + 1) % offenseLineup.length;
-    const nextOffenseIndex = managerBattingIndexByTeam[nextOffenseTeamId] ?? 0;
-
-    setManagerBattingIndexByTeam((current) => {
-      const next = {
-        ...current,
-        [offenseTeamId]: nextCurrentIndex
-      };
-
-      if (next[nextOffenseTeamId] === undefined) {
-        next[nextOffenseTeamId] = 0;
-      }
-
-      return next;
-    });
-
-    const nextLineup =
-      nextOffenseTeamId === managerOwnLineupView?.teamId
-        ? managerOwnLineupView.entries
-        : nextOffenseTeamId === managerRivalLineupView?.teamId
-          ? managerRivalLineupView.entries
-          : [];
-
-    const batterForNextPlay =
-      nextLineup.length > 0
-        ? nextLineup[(nextOffenseTeamId === offenseTeamId ? nextCurrentIndex : nextOffenseIndex) % nextLineup.length]
-            ?.identificationNumber ?? ''
-        : '';
-
-    setManagerLiveOffenseTeamId(nextOffenseTeamId);
-    setManagerLiveBatterCedula(batterForNextPlay);
-    setManagerBaseRunners(nextBases);
-    setManagerPlayLog((current) => [
-      {
-        id: `${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
-        teamId: offenseTeamId,
-        batterIdentificationNumber,
-        result: managerLiveResultDraft,
-        runsScored: playResolution.runsScored,
-        inning: nextInning
-      },
-      ...current
-    ].slice(0, 12));
-
-    setManagerUiStatus({
-      kind: 'success',
-      message:
-        playResolution.runsScored > 0
-          ? `Jugada registrada: ${managerLiveResultLabel}. Carreras anotadas: ${playResolution.runsScored}.`
-          : `Jugada registrada: ${managerLiveResultLabel}.`
-    });
-  };
-
-  const pushRosterCedula = () => {
-    if (!managerContextReady) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Primero activa el contexto de torneo/equipo en tu perfil antes de editar roster o lineup.'
-      });
-      return;
-    }
-
-    const normalized = normalizeCedula(managerRosterCedulaDraft);
-
-    if (normalized.length < 4) {
-      setManagerUiStatus({ kind: 'error', message: 'Ingresa una cedula valida (minimo 4 caracteres).' });
-      return;
-    }
-
-    if (managerRosterCedulas.includes(normalized)) {
-      setManagerUiStatus({ kind: 'error', message: `La cedula ${normalized} ya esta en el draft del roster.` });
-      return;
-    }
-
-    setManagerRosterCedulas((current) => [...current, normalized]);
-    setManagerRosterCedulaDraft('');
-    setManagerUiStatus({ kind: 'idle', message: '' });
-  };
-
-  const removeRosterCedula = (identificationNumber: string) => {
-    setManagerRosterCedulas((current) => current.filter((id) => id !== identificationNumber));
-    setManagerLineupEntries((current) =>
-      current.filter((entry) => entry.identificationNumber !== identificationNumber)
-    );
-  };
-
   const upsertLineupEntry = () => {
     if (!managerContextReady) {
       setManagerUiStatus({
@@ -2132,8 +1980,9 @@ export default function App() {
     }
 
     const identificationNumber = normalizeCedula(managerLineupCedulaDraft);
-    const battingOrder = Number.parseInt(managerLineupBattingOrderDraft, 10);
+    const battingOrder = managerLineupRoleDraft === 'FLEX' ? null : 1;
     const fieldPosition = managerLineupFieldPositionDraft.trim().toUpperCase();
+    const jerseyNumber = managerLineupJerseyNumberDraft.trim();
 
     if (identificationNumber.length < 4) {
       setManagerUiStatus({ kind: 'error', message: 'Selecciona una cedula valida para el lineup.' });
@@ -2148,11 +1997,6 @@ export default function App() {
       return;
     }
 
-    if (!Number.isInteger(battingOrder) || battingOrder < 1 || battingOrder > 99) {
-      setManagerUiStatus({ kind: 'error', message: 'La posicion de bateo debe ser un numero entre 1 y 99.' });
-      return;
-    }
-
     if (!fieldPositionOptions.includes(fieldPosition)) {
       setManagerUiStatus({
         kind: 'error',
@@ -2161,33 +2005,64 @@ export default function App() {
       return;
     }
 
-    const duplicatedOrder = managerLineupEntries.find(
-      (entry) => entry.battingOrder === battingOrder && entry.identificationNumber !== identificationNumber
-    );
+    if (managerLineupRoleDraft === 'FLEX' && fieldPosition === 'NA') {
+      setManagerUiStatus({ kind: 'error', message: 'El FLEX debe tener una posicion defensiva.' });
+      return;
+    }
 
-    if (duplicatedOrder) {
+    const otherEntries = managerLineupEntries.filter((entry) => entry.identificationNumber !== identificationNumber);
+    if (otherEntries.length >= 14) {
+      setManagerUiStatus({ kind: 'error', message: 'El lineup permite hasta 13 bateadores y un FLEX.' });
+      return;
+    }
+    if (battingOrder !== null && otherEntries.filter((entry) => entry.battingOrder !== null).length >= 13) {
+      setManagerUiStatus({ kind: 'error', message: 'El lineup permite hasta 13 bateadores.' });
+      return;
+    }
+    if (managerLineupRoleDraft === 'FLEX' && otherEntries.some((entry) => entry.lineupRole === 'FLEX')) {
+      setManagerUiStatus({ kind: 'error', message: 'El lineup permite un solo FLEX.' });
+      return;
+    }
+
+    if (!/^\d{1,2}$/.test(jerseyNumber)) {
       setManagerUiStatus({
         kind: 'error',
-        message: `El orden ${battingOrder} ya esta asignado a ${duplicatedOrder.identificationNumber}.`
+        message: 'Ingresa un numero de camiseta entre 0 y 99.'
+      });
+      return;
+    }
+
+    const duplicatedJerseyNumber = managerLineupEntries.find(
+      (entry) =>
+        entry.jerseyNumber === jerseyNumber && entry.identificationNumber !== identificationNumber
+    );
+
+    if (duplicatedJerseyNumber) {
+      setManagerUiStatus({
+        kind: 'error',
+        message: `El numero de camiseta ${jerseyNumber} ya esta asignado a ${duplicatedJerseyNumber.identificationNumber}.`
       });
       return;
     }
 
     setManagerLineupEntries((current) => {
-      const next = current.filter((entry) => entry.identificationNumber !== identificationNumber);
-      next.push({ identificationNumber, battingOrder, fieldPosition });
-      return next.sort((a, b) => a.battingOrder - b.battingOrder);
+      const updated = { identificationNumber, battingOrder, fieldPosition, lineupRole: managerLineupRoleDraft, jerseyNumber };
+      const next = current.some((entry) => entry.identificationNumber === identificationNumber)
+        ? current.map((entry) => entry.identificationNumber === identificationNumber ? updated : entry)
+        : [...current, updated];
+      return assignBattingOrder(next);
     });
 
     setManagerLineupCedulaDraft('');
-    setManagerLineupBattingOrderDraft(String(managerLineupEntries.length + 1));
     setManagerLineupFieldPositionDraft('P');
+    setManagerLineupRoleDraft('PLAYER');
+    setManagerLineupJerseyNumberDraft('');
     setManagerUiStatus({ kind: 'idle', message: '' });
   };
 
   const removeLineupEntry = (identificationNumber: string) => {
     setManagerLineupEntries((current) =>
-      current.filter((entry) => entry.identificationNumber !== identificationNumber)
+      assignBattingOrder(current.filter((entry) => entry.identificationNumber !== identificationNumber))
     );
   };
 
@@ -2205,123 +2080,17 @@ export default function App() {
       return;
     }
 
-    const autoPositions = ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH'];
-    const seeded = managerRosterCedulas.map((identificationNumber, index) => ({
+    const autoPositions = ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'OF4', 'SF', 'LF', 'CF'];
+    const seeded = managerRosterCedulas.slice(0, 13).map((identificationNumber, index) => ({
       identificationNumber,
       battingOrder: index + 1,
-      fieldPosition: autoPositions[Math.min(index, autoPositions.length - 1)]
+      fieldPosition: autoPositions[Math.min(index, autoPositions.length - 1)],
+      lineupRole: 'PLAYER' as const,
+      jerseyNumber: ''
     }));
 
     setManagerLineupEntries(seeded);
     setManagerUiStatus({ kind: 'success', message: 'Lineup base generado desde el roster. Ajusta posiciones si quieres.' });
-  };
-
-  const registerGlobalPlayerFromManager = async () => {
-    const displayName = managerPlayerNameDraft.trim();
-    const identificationNumber = normalizeCedula(managerPlayerCedulaDraft);
-    const representativeIdentificationNumber = normalizeCedula(managerRepresentativeCedulaDraft);
-    const actorId = managerProfileId.trim();
-
-    if (!actorId) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Debes indicar managerId en perfil para registrar jugadores globales.'
-      });
-      return;
-    }
-
-    if (!displayName) {
-      setManagerUiStatus({ kind: 'error', message: 'El nombre del jugador es obligatorio.' });
-      return;
-    }
-
-    if (identificationNumber.length < 4) {
-      setManagerUiStatus({ kind: 'error', message: 'La cedula del jugador no es valida.' });
-      return;
-    }
-
-    if (managerIsMinorDraft && representativeIdentificationNumber.length < 4) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Si el jugador es menor, agrega cedula de padre o representante (minimo 4 caracteres).'
-      });
-      return;
-    }
-
-    setManagerSubmitting(true);
-    setManagerUiStatus({ kind: 'idle', message: '' });
-
-    try {
-      await postOfficialScoring('players', {
-        actorId,
-        displayName,
-        identificationNumber,
-        isMinor: managerIsMinorDraft,
-        representativeIdentificationNumber: managerIsMinorDraft ? representativeIdentificationNumber : undefined
-      });
-
-      setManagerUiStatus({ kind: 'success', message: `Jugador ${displayName} registrado globalmente.` });
-      setManagerPlayerNameDraft('');
-      setManagerPlayerCedulaDraft('');
-      setManagerRepresentativeCedulaDraft('');
-      setManagerIsMinorDraft(false);
-
-      if (managerContextReady && !managerRosterCedulas.includes(identificationNumber)) {
-        setManagerRosterCedulas((current) => [...current, identificationNumber]);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo registrar el jugador.';
-      setManagerUiStatus({ kind: 'error', message: adaptManagerError(message) });
-    } finally {
-      setManagerSubmitting(false);
-    }
-  };
-
-  const submitRosterToTournament = async () => {
-    if (!managerContextReady) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Primero activa el contexto en perfil (torneo, equipo, juego y manager).'
-      });
-      return;
-    }
-
-    const context = buildManagerContext();
-
-    if (!context.tournamentId || !context.teamId || !context.managerId) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Debes indicar tournamentId, teamId y managerId antes de guardar roster.'
-      });
-      return;
-    }
-
-    if (managerRosterCedulas.length === 0) {
-      setManagerUiStatus({ kind: 'error', message: 'Agrega al menos una cedula al roster antes de guardar.' });
-      return;
-    }
-
-    setManagerSubmitting(true);
-    setManagerUiStatus({ kind: 'idle', message: '' });
-
-    try {
-      await postOfficialScoring(`tournaments/${context.tournamentId}/teams/${context.teamId}/roster`, {
-        managerId: context.managerId,
-        playerIdentificationNumbers: managerRosterCedulas
-      });
-
-      await loadRosterFromContext(context, { silent: true });
-
-      setManagerUiStatus({
-        kind: 'success',
-        message: `Roster guardado para ${context.teamId} en ${context.tournamentId}.`
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo guardar el roster.';
-      setManagerUiStatus({ kind: 'error', message: adaptManagerError(message) });
-    } finally {
-      setManagerSubmitting(false);
-    }
   };
 
   const submitLineupToGame = async () => {
@@ -2346,12 +2115,39 @@ export default function App() {
     if (managerLineupEntries.length === 0) {
       setManagerUiStatus({
         kind: 'error',
-        message: 'Primero construye el lineup indicando orden de bateo y posicion de juego.'
+        message: 'Primero agrega jugadores al lineup indicando su posicion de juego.'
       });
       return;
     }
 
-    const sortedEntries = [...managerLineupEntries].sort((a, b) => a.battingOrder - b.battingOrder);
+    const sortedEntries = [...managerLineupEntries].sort(
+      (a, b) =>
+        (a.battingOrder ?? Number.MAX_SAFE_INTEGER) - (b.battingOrder ?? Number.MAX_SAFE_INTEGER)
+    );
+    const battingEntries = sortedEntries.filter((entry) => entry.battingOrder !== null);
+    const dpCount = sortedEntries.filter((entry) => entry.lineupRole === 'DP').length;
+    const flexCount = sortedEntries.filter((entry) => entry.lineupRole === 'FLEX').length;
+    if (battingEntries.length < 9 || battingEntries.length > 13 || sortedEntries.length > 14) {
+      setManagerUiStatus({
+        kind: 'error',
+        message: 'El lineup debe tener de 9 a 13 bateadores y permite un FLEX adicional.'
+      });
+      return;
+    }
+
+    if (dpCount !== flexCount || flexCount > 1) {
+      setManagerUiStatus({ kind: 'error', message: 'El DP y el FLEX deben registrarse juntos.' });
+      return;
+    }
+    const missingJerseyNumber = sortedEntries.find((entry) => !/^\d{1,2}$/.test(entry.jerseyNumber));
+
+    if (missingJerseyNumber) {
+      setManagerUiStatus({
+        kind: 'error',
+        message: `Asigna un numero de camiseta entre 0 y 99 a ${missingJerseyNumber.identificationNumber}.`
+      });
+      return;
+    }
 
     const missingFromRoster = sortedEntries.find(
       (entry) => !managerRosterCedulas.includes(entry.identificationNumber)
@@ -2365,7 +2161,7 @@ export default function App() {
       return;
     }
 
-    const hasNonConsecutiveOrder = sortedEntries.some((entry, index) => entry.battingOrder !== index + 1);
+    const hasNonConsecutiveOrder = battingEntries.some((entry, index) => entry.battingOrder !== index + 1);
     if (hasNonConsecutiveOrder) {
       setManagerUiStatus({
         kind: 'error',
@@ -2383,7 +2179,7 @@ export default function App() {
         teamId: context.teamId,
         managerId: context.managerId,
         playerIdentificationNumbers: sortedEntries.map((entry) => entry.identificationNumber),
-        lineupEntries: sortedEntries
+        lineupEntries: sortedEntries,
       });
 
       await loadGameLineupsFromContext(context, { silent: true });
@@ -2410,7 +2206,7 @@ export default function App() {
             <Text style={styles.roleSetupTitle}>Elige como quieres entrar hoy</Text>
             <Text style={styles.roleSetupBody}>
               Este paso define las funciones visibles. La anotacion en vivo oficial es de anotador u
-              organizador; la de manager es solo individual.
+              organizador; el manager entrega su lineup y consulta ese mismo registro oficial.
             </Text>
           </View>
 
@@ -2451,7 +2247,7 @@ export default function App() {
     const moduleActions = isLiveScoringModule
       ? getLiveScoringActions(currentRoleId)
       : activeModule.actions;
-    const showManagerPrivateBoard = isLiveScoringModule && currentRoleId === 'manager';
+    const showManagerOfficialBoard = isLiveScoringModule && currentRoleId === 'manager';
     const showOfficialPlayByPlayPanel = isLiveScoringModule && officialScoringRoles.includes(currentRoleId);
 
     return (
@@ -2538,6 +2334,36 @@ export default function App() {
                     <Text style={styles.managerButtonOutlineText}>Cargar estado oficial</Text>
                   </Pressable>
 
+                  {currentRoleId === 'organizer' ? (
+                    <View>
+                      <Text style={styles.managerLabel}>Regla de corredor temporal del torneo</Text>
+                      <View style={styles.rosterChipWrap}>
+                        {[
+                          { value: 'BENCH' as const, label: 'Solo banca' },
+                          { value: 'ROSTER' as const, label: 'Cualquier jugador del roster' }
+                        ].map((option) => (
+                          <Pressable
+                            key={option.value}
+                            style={[
+                              styles.rosterSelectChip,
+                              organizerCourtesyRunnerSourceDraft === option.value ? styles.rosterSelectChipActive : null
+                            ]}
+                            onPress={() => setOrganizerCourtesyRunnerSourceDraft(option.value)}
+                          >
+                            <Text style={styles.rosterSelectChipText}>{option.label}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                      <Pressable
+                        style={styles.managerButton}
+                        disabled={officialSubmitting}
+                        onPress={saveTournamentRules}
+                      >
+                        <Text style={styles.managerButtonText}>Guardar regla del torneo</Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
+
                   <Text style={styles.managerLabel}>Tipo de jugada</Text>
                   <View style={styles.rosterChipWrap}>
                     {officialPlayEventOptions.map((option) => (
@@ -2547,7 +2373,7 @@ export default function App() {
                           styles.rosterSelectChip,
                           officialEventTypeDraft === option.value ? styles.rosterSelectChipActive : null
                         ]}
-                        onPress={() => setOfficialEventTypeDraft(option.value)}
+                        onPress={() => { setOfficialEventTypeDraft(option.value); setOfficialErrorOutsDraft(''); }}
                       >
                         <Text style={styles.rosterSelectChipText}>{option.label}</Text>
                       </Pressable>
@@ -2572,16 +2398,14 @@ export default function App() {
                     autoCorrect={false}
                   />
 
-                  <Text style={styles.managerLabel}>Pitcher (cedula)</Text>
-                  <TextInput
-                    value={officialPitcherCedulaDraft}
-                    onChangeText={setOfficialPitcherCedulaDraft}
-                    style={styles.managerInput}
-                    autoCapitalize="characters"
-                    autoCorrect={false}
-                  />
+                  <Text style={styles.managerLabel}>El lanzador se identifica desde la posición P de la alineación defensiva. Confirma su cambio antes de continuar anotando.</Text>
+                  {['error', 'ERROR_ADVANCE'].includes(officialEventTypeDraft) ? <>
+                    <Text style={styles.managerLabel}>Outs evitados por el error (0: solo avance; 1: debió ser out)</Text>
+                    <TextInput value={officialErrorOutsDraft} onChangeText={setOfficialErrorOutsDraft}
+                      style={styles.managerInput} keyboardType="number-pad" maxLength={1} />
+                  </> : null}
 
-                  <Text style={styles.managerLabel}>Corredor (cedula, opcional)</Text>
+                  <Text style={styles.managerLabel}>Corredor / corredor temporal (cedula)</Text>
                   <TextInput
                     value={officialRunnerCedulaDraft}
                     onChangeText={setOfficialRunnerCedulaDraft}
@@ -2669,7 +2493,7 @@ export default function App() {
                       <Text style={styles.managerRosterListTitle}>Resumen pitchers</Text>
                       {officialPlayByPlaySnapshot.pitcherStats.slice(0, 6).map((stat) => (
                         <Text key={`pit-${stat.identificationNumber}`} style={styles.managerRosterListRow}>
-                          {stat.identificationNumber} · P {stat.pitches} · BF {stat.battersFaced} · H {stat.hitsAllowed} · R {stat.runsAllowed} · BB {stat.walksAllowed} · K {stat.strikeouts}
+                          {stat.identificationNumber} · P {stat.pitches} · BF {stat.battersFaced} · H {stat.hitsAllowed} · R {stat.runsAllowed} · CL {stat.earnedRuns ?? '—'} · CS {stat.unearnedRuns ?? '—'} · Pendientes {stat.pendingRuns ?? '—'} · BB {stat.walksAllowed} · K {stat.strikeouts}
                         </Text>
                       ))}
                     </View>
@@ -2697,126 +2521,22 @@ export default function App() {
                 </View>
               ) : null}
 
-              {showManagerPrivateBoard ? (
-                <>
-                  <View style={styles.scoreboardPrivateCard}>
-                    <Text style={styles.scoreboardTitle}>Pizarra privada del manager</Text>
-                    <Text style={styles.scoreboardScore}>
-                      {(managerTeamId.trim() || 'Mi equipo')} {managerPrivateLiveState.homeScore} -{' '}
-                      {managerPrivateLiveState.awayScore} {(managerRivalLineupView?.teamId ?? 'Rival')}
-                    </Text>
-                    <Text style={styles.scoreboardMeta}>Estado: {managerPrivateLiveState.status}</Text>
-                    <Text style={styles.scoreboardMeta}>Inning {managerPrivateLiveState.inning} · Outs {managerPrivateLiveState.outs}</Text>
-                    <Text style={styles.scoreboardMeta}>Ultima jugada: {managerPrivateLiveState.lastPlay}</Text>
-                    <Text style={styles.scoreboardMeta}>No impacta el resultado oficial</Text>
-                  </View>
-
-                  <View style={styles.managerLivePlayCard}>
-                    <Text style={styles.managerPanelTitle}>EV · Anotacion jugada a jugada</Text>
-                    <Text style={styles.managerPanelBody}>
-                      Selecciona bateador del lineup y resultado. La pizarra privada se actualiza automaticamente.
-                    </Text>
-
-                    <Pressable
-                      style={[styles.managerButtonOutline, managerSubmitting ? styles.managerButtonDisabled : null]}
-                      disabled={managerSubmitting || !managerContextReady}
-                      onPress={() => loadGameLineupsFromContext(buildManagerContext())}
-                    >
-                      <Text style={styles.managerButtonOutlineText}>Cargar lineups del juego</Text>
-                    </Pressable>
-
-                    {managerOwnLineupView || managerRivalLineupView ? (
-                      <View style={styles.rosterChipWrap}>
-                        {managerOwnLineupView ? (
-                          <Pressable
-                            style={[
-                              styles.rosterSelectChip,
-                              managerLiveOffenseTeamId === managerOwnLineupView.teamId ? styles.rosterSelectChipActive : null
-                            ]}
-                            onPress={() => selectManagerLiveOffenseTeam(managerOwnLineupView.teamId)}
-                          >
-                            <Text style={styles.rosterSelectChipText}>Ofensiva {managerOwnLineupView.teamId}</Text>
-                          </Pressable>
-                        ) : null}
-
-                        {managerRivalLineupView ? (
-                          <Pressable
-                            style={[
-                              styles.rosterSelectChip,
-                              managerLiveOffenseTeamId === managerRivalLineupView.teamId ? styles.rosterSelectChipActive : null
-                            ]}
-                            onPress={() => selectManagerLiveOffenseTeam(managerRivalLineupView.teamId)}
-                          >
-                            <Text style={styles.rosterSelectChipText}>Ofensiva {managerRivalLineupView.teamId}</Text>
-                          </Pressable>
-                        ) : null}
-                      </View>
-                    ) : null}
-
-                    {managerLiveCurrentBatter ? (
-                      <Text style={styles.managerLiveHintText}>Turno actual: {managerLiveCurrentBatter}</Text>
-                    ) : (
-                      <Text style={styles.managerLiveHintText}>Carga lineups para iniciar jugada a jugada.</Text>
-                    )}
-
-                    {managerLiveOffenseLineup.length > 0 ? (
-                      <View style={styles.rosterChipWrap}>
-                        {managerLiveOffenseLineup.map((entry) => (
-                          <Pressable
-                            key={`play-${entry.identificationNumber}-${entry.battingOrder}`}
-                            style={[
-                              styles.rosterSelectChip,
-                              managerLiveBatterCedula === entry.identificationNumber ? styles.rosterSelectChipActive : null
-                            ]}
-                            onPress={() => setManagerLiveBatterCedula(entry.identificationNumber)}
-                          >
-                            <Text style={styles.rosterSelectChipText}>#{entry.battingOrder} {entry.identificationNumber}</Text>
-                          </Pressable>
-                        ))}
-                      </View>
-                    ) : null}
-
-                    <View style={styles.rosterChipWrap}>
-                      {managerPlayResultOptions.map((option) => (
-                        <Pressable
-                          key={option.value}
-                          style={[
-                            styles.rosterSelectChip,
-                            managerLiveResultDraft === option.value ? styles.rosterSelectChipActive : null
-                          ]}
-                          onPress={() => setManagerLiveResultDraft(option.value)}
-                        >
-                          <Text style={styles.rosterSelectChipText}>{option.label}</Text>
-                        </Pressable>
-                      ))}
-                    </View>
-
-                    <Pressable
-                      style={[styles.managerButton, managerSubmitting ? styles.managerButtonDisabled : null]}
-                      disabled={managerSubmitting}
-                      onPress={recordManagerLivePlay}
-                    >
-                      <Text style={styles.managerButtonText}>Registrar jugada y actualizar marcador</Text>
-                    </Pressable>
-
-                    <Text style={styles.managerLiveHintText}>
-                      Bases: 1B {managerBaseRunners.first ?? '-'} · 2B {managerBaseRunners.second ?? '-'} · 3B {managerBaseRunners.third ?? '-'}
-                    </Text>
-
-                    {managerPlayLog.length > 0 ? (
-                      <View style={styles.lineupEntryListCard}>
-                        <Text style={styles.managerRosterListTitle}>Bitacora en vivo</Text>
-                        {managerPlayLog.map((item) => (
-                          <Text key={item.id} style={styles.managerRosterListRow}>
-                            Inning {item.inning} · {item.teamId} · {item.batterIdentificationNumber} · {item.result}
-                            {item.runsScored > 0 ? ` · +${item.runsScored}` : ''}
-                          </Text>
-                        ))}
-                      </View>
-                    ) : null}
-                  </View>
-                </>
-              ) : null}
+              {showManagerOfficialBoard ? <View style={styles.managerLivePlayCard}>
+                <Text style={styles.managerPanelTitle}>Consulta oficial en vivo · Sin edicion</Text>
+                <Text style={styles.managerPanelBody}>Entrega tu lineup usando el roster aprobado. Comunica los cambios en el campo; el anotador u organizador los registra y aqui se actualizan automaticamente.</Text>
+                {managerOfficialError ? <Text style={styles.managerStatusErrorText}>{managerOfficialError}</Text> : null}
+                {!managerContextReady ? <Text style={styles.managerPanelBody}>Activa primero el partido desde tu perfil.</Text> : null}
+                {managerOfficialScorecard ? <>
+                  <Text style={styles.managerLiveHintText}>Bases: {managerOfficialScorecard.bases.map((id, base) => `${base + 1}B ${id ?? '-'}`).join(' · ')}</Text>
+                  {(['away', 'home'] as const).map((side) => <View key={side} style={styles.lineupEntryListCard}>
+                    <Text style={styles.managerRosterListTitle}>{side === 'away' ? 'Visitante' : 'Local'} · Alineacion oficial</Text>
+                    {managerOfficialScorecard.lineups[side].map((player) => {
+                      const stats = scorecardStats(managerOfficialScorecard, side, player.id);
+                      return <Text key={player.id} style={styles.managerRosterListRow}>{player.order ?? '-'} · {player.name} · #{player.jersey || '-'} · {player.position} · H {stats.hits} de {stats.atBats} · AVG {stats.average} · C {stats.runs}</Text>;
+                    })}
+                  </View>)}
+                </> : null}
+              </View> : null}
             </>
           ) : null}
 
@@ -2868,7 +2588,7 @@ export default function App() {
 
                 <Pressable style={styles.managerQuickIconButton} onPress={openManagerLineupSummary}>
                   <Text style={styles.managerQuickIconBadge}>RS</Text>
-                  <Text style={styles.managerQuickIconLabel}>Resumen</Text>
+                  <Text style={styles.managerQuickIconLabel}>Hoja de juego</Text>
                 </Pressable>
 
                 <Pressable style={styles.managerQuickIconButton} onPress={openManagerRivalLineupViewer}>
@@ -2884,95 +2604,7 @@ export default function App() {
 
               <View style={styles.managerDivider} />
 
-              <Text style={styles.managerPanelTitle}>Registrar jugador global</Text>
-              <Text style={styles.managerLabel}>Nombre</Text>
-              <TextInput
-                value={managerPlayerNameDraft}
-                onChangeText={setManagerPlayerNameDraft}
-                style={styles.managerInput}
-                placeholder="Nombre del jugador"
-                placeholderTextColor="#8aa0ad"
-              />
-
-              <Text style={styles.managerLabel}>Cedula</Text>
-              <TextInput
-                value={managerPlayerCedulaDraft}
-                onChangeText={setManagerPlayerCedulaDraft}
-                style={styles.managerInput}
-                placeholder="V12345678"
-                placeholderTextColor="#8aa0ad"
-                autoCapitalize="characters"
-                autoCorrect={false}
-              />
-
-              <Pressable
-                style={[styles.managerToggle, managerIsMinorDraft ? styles.managerToggleActive : null]}
-                onPress={() => setManagerIsMinorDraft((current) => !current)}
-              >
-                <Text style={styles.managerToggleText}>
-                  {managerIsMinorDraft ? 'Menor de edad: SI' : 'Menor de edad: NO'}
-                </Text>
-              </Pressable>
-
-              {managerIsMinorDraft ? (
-                <>
-                  <Text style={styles.managerLabel}>Cedula de padre/representante</Text>
-                  <TextInput
-                    value={managerRepresentativeCedulaDraft}
-                    onChangeText={setManagerRepresentativeCedulaDraft}
-                    style={styles.managerInput}
-                    placeholder="V87654321"
-                    placeholderTextColor="#8aa0ad"
-                    autoCapitalize="characters"
-                    autoCorrect={false}
-                  />
-                </>
-              ) : null}
-
-              <Pressable
-                style={[styles.managerButton, managerSubmitting ? styles.managerButtonDisabled : null]}
-                disabled={managerSubmitting}
-                onPress={registerGlobalPlayerFromManager}
-              >
-                <Text style={styles.managerButtonText}>
-                  {managerSubmitting ? 'Procesando...' : 'Registrar jugador global'}
-                </Text>
-              </Pressable>
-
-              <View style={styles.managerDivider} />
-
-              <Text style={styles.managerPanelTitle}>Roster oficial del equipo</Text>
-              <TextInput
-                value={managerRosterCedulaDraft}
-                onChangeText={setManagerRosterCedulaDraft}
-                style={styles.managerInput}
-                placeholder="Agregar cedula al roster"
-                placeholderTextColor="#8aa0ad"
-                autoCapitalize="characters"
-                autoCorrect={false}
-              />
-
-              <Pressable
-                style={[styles.managerButton, managerSubmitting ? styles.managerButtonDisabled : null]}
-                disabled={managerSubmitting}
-                onPress={pushRosterCedula}
-              >
-                <Text style={styles.managerButtonText}>Agregar cedula al draft</Text>
-              </Pressable>
-
-              {managerRosterCedulas.length > 0 ? (
-                <View style={styles.rosterChipWrap}>
-                  {managerRosterCedulas.map((id) => (
-                    <Pressable key={id} style={styles.rosterChip} onPress={() => removeRosterCedula(id)}>
-                      <Text style={styles.rosterChipText}>
-                        {managerRosterNamesByCedula.get(id) ? `${managerRosterNamesByCedula.get(id)} · ${id}` : id} ·
-                        quitar
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-              ) : null}
-
+              <Text style={styles.managerPanelTitle}>Roster aprobado por el organizador · Solo lectura</Text>
               {managerRosterPlayers.length > 0 ? (
                 <View style={styles.managerRosterListCard}>
                   <Text style={styles.managerRosterListTitle}>Roster cargado desde API</Text>
@@ -2984,21 +2616,11 @@ export default function App() {
                 </View>
               ) : null}
 
-              <Pressable
-                style={[styles.managerButton, managerSubmitting ? styles.managerButtonDisabled : null]}
-                disabled={managerSubmitting}
-                onPress={submitRosterToTournament}
-              >
-                <Text style={styles.managerButtonText}>
-                  {managerSubmitting ? 'Procesando...' : 'Guardar roster en torneo'}
-                </Text>
-              </Pressable>
-
               <View style={styles.managerDivider} />
 
               <Text style={styles.managerPanelTitle}>Builder de lineup</Text>
               <Text style={styles.managerPanelBody}>
-                Selecciona cedula, posicion de bateo y posicion de juego. Solo se permiten cedulas que esten en
+                Selecciona cedula y posicion de juego. El orden de bateo se asigna al agregar. Solo se permiten cedulas que esten en
                 el roster del equipo.
               </Text>
 
@@ -3027,17 +2649,28 @@ export default function App() {
                 autoCorrect={false}
               />
 
-              <Text style={styles.managerLabel}>Posicion de bateo</Text>
-              <TextInput
-                value={managerLineupBattingOrderDraft}
-                onChangeText={setManagerLineupBattingOrderDraft}
-                style={styles.managerInput}
-                keyboardType="number-pad"
-                placeholder="1"
-                placeholderTextColor="#8aa0ad"
-              />
+              <Text style={styles.managerPanelBody}>
+                El orden de bateo se asigna al agregar jugadores. Al actualizar, conservan su lugar;
+                al quitar uno, se ajustan los turnos. El jugador flexible no batea.
+              </Text>
 
-              <Text style={styles.managerLabel}>Posicion de juego (P, C, 1B, 2B, 3B, SS, LF, CF, RF, DH)</Text>
+              <Text style={styles.managerLabel}>Rol en el lineup</Text>
+              <View style={styles.rosterChipWrap}>
+                {lineupRoleOptions.map((option) => (
+                  <Pressable
+                    key={option.value}
+                    style={[
+                      styles.rosterSelectChip,
+                      managerLineupRoleDraft === option.value ? styles.rosterSelectChipActive : null
+                    ]}
+                    onPress={() => setManagerLineupRoleDraft(option.value)}
+                  >
+                    <Text style={styles.rosterSelectChipText}>{option.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={styles.managerLabel}>Posicion defensiva (OF4: cuarto outfielder · SF: shortfield · NA: sin defensa)</Text>
               <TextInput
                 value={managerLineupFieldPositionDraft}
                 onChangeText={setManagerLineupFieldPositionDraft}
@@ -3046,6 +2679,20 @@ export default function App() {
                 placeholderTextColor="#8aa0ad"
                 autoCapitalize="characters"
                 autoCorrect={false}
+              />
+
+              <Text style={styles.managerPanelBody}>
+                La regla del corredor temporal la configura el organizador del torneo, no el manager.
+              </Text>
+
+              <Text style={styles.managerLabel}>Numero de camiseta para este juego (0-99)</Text>
+              <TextInput
+                value={managerLineupJerseyNumberDraft}
+                onChangeText={setManagerLineupJerseyNumberDraft}
+                style={styles.managerInput}
+                keyboardType="number-pad"
+                placeholder="Ej. 12"
+                placeholderTextColor="#8aa0ad"
               />
 
               <Pressable
@@ -3066,15 +2713,17 @@ export default function App() {
 
               {managerLineupEntries.length > 0 ? (
                 <View style={styles.lineupEntryListCard}>
-                  <Text style={styles.managerRosterListTitle}>Lineup draft</Text>
+                  <Text style={styles.managerRosterListTitle}>
+                    Lineup draft · {managerLineupEntries.filter((entry) => entry.battingOrder !== null).length} bateadores / {managerLineupEntries.length} jugadores
+                  </Text>
                   {managerLineupEntries.map((entry) => (
                     <Pressable
-                      key={`${entry.identificationNumber}-${entry.battingOrder}`}
+                      key={`${entry.identificationNumber}-${entry.battingOrder ?? entry.lineupRole}`}
                       style={styles.lineupEntryRow}
                       onPress={() => removeLineupEntry(entry.identificationNumber)}
                     >
                       <Text style={styles.lineupEntryText}>
-                        #{entry.battingOrder} · {entry.identificationNumber} · {entry.fieldPosition} · quitar
+                        {entry.battingOrder === null ? 'Sin turno' : `#${entry.battingOrder}`} · {entry.lineupRole} · Camiseta {entry.jerseyNumber || '—'} · {entry.identificationNumber} · {entry.fieldPosition} · quitar
                       </Text>
                     </Pressable>
                   ))}
@@ -3101,8 +2750,8 @@ export default function App() {
                   <Text style={styles.managerRosterListTitle}>Mi lineup ({managerOwnLineupView.teamId})</Text>
                   {managerOwnLineupView.entries.length > 0 ? (
                     managerOwnLineupView.entries.map((entry) => (
-                      <Text key={`own-${entry.identificationNumber}-${entry.battingOrder}`} style={styles.managerRosterListRow}>
-                        #{entry.battingOrder} · {entry.identificationNumber} · {entry.fieldPosition}
+                      <Text key={`own-${entry.identificationNumber}-${entry.battingOrder ?? entry.lineupRole}`} style={styles.managerRosterListRow}>
+                        {entry.battingOrder === null ? entry.lineupRole : `#${entry.battingOrder}`} · Camiseta {entry.jerseyNumber || '—'} · {entry.displayName ?? entry.identificationNumber} · {entry.fieldPosition}
                       </Text>
                     ))
                   ) : (
@@ -3116,8 +2765,8 @@ export default function App() {
                   <Text style={styles.managerRosterListTitle}>Lineup rival ({managerRivalLineupView.teamId})</Text>
                   {managerRivalLineupView.entries.length > 0 ? (
                     managerRivalLineupView.entries.map((entry) => (
-                      <Text key={`rival-${entry.identificationNumber}-${entry.battingOrder}`} style={styles.managerRosterListRow}>
-                        #{entry.battingOrder} · {entry.identificationNumber} · {entry.fieldPosition}
+                      <Text key={`rival-${entry.identificationNumber}-${entry.battingOrder ?? entry.lineupRole}`} style={styles.managerRosterListRow}>
+                        {entry.battingOrder === null ? entry.lineupRole : `#${entry.battingOrder}`} · Camiseta {entry.jerseyNumber || '—'} · {entry.displayName ?? entry.identificationNumber} · {entry.fieldPosition}
                       </Text>
                     ))
                   ) : (
@@ -3128,9 +2777,9 @@ export default function App() {
 
               <View style={styles.managerDivider} />
 
-              <Text style={styles.managerPanelTitle}>Resumen tactico por lineup</Text>
+              <Text style={styles.managerPanelTitle}>Hoja de juego por lineup</Text>
               <Text style={styles.managerPanelBody}>
-                Este resumen te muestra turnos recientes, errores y carga de pitcheo de ambos equipos para decidir cambios de pitcher, ajustes del cuadro y jugada siguiente.
+                Consulta las estadisticas acumuladas, cada turno al bate con su inning y los errores defensivos de cada jugador. Actualiza durante el juego para ver las jugadas oficiales mas recientes.
               </Text>
 
               <Pressable
@@ -3144,12 +2793,90 @@ export default function App() {
                 onPress={loadManagerTacticalSummary}
               >
                 <Text style={styles.managerButtonOutlineText}>
-                  {managerTacticalLoading ? 'Cargando resumen...' : 'Cargar resumen propio y rival'}
+                  {managerTacticalLoading ? 'Actualizando hoja...' : 'Actualizar lineup y estadisticas'}
                 </Text>
               </Pressable>
 
               {managerTacticalSummary ? (
                 <>
+                  <View style={styles.managerRosterListCard}>
+                    <Text style={styles.managerRosterListTitle}>
+                      {managerTacticalSummary.ownTeamId} · turnos y defensa
+                    </Text>
+                    {managerTacticalSummary.ownScorecard.length > 0 ? (
+                      managerTacticalSummary.ownScorecard.map((row) => (
+                        <View key={`own-scorecard-${row.identificationNumber}`}>
+                          <Text style={styles.managerRosterListRow}>
+                            {row.battingOrder === null ? row.lineupRole : `#${row.battingOrder}`} · Camiseta {row.jerseyNumber || '—'} · {row.displayName} · {row.fieldPosition} · PA {row.plateAppearances} · H {row.hits} · AVG {formatBattingAverage(row.hits, row.atBatsCount)} · BB {row.walks} · K {row.strikeouts} · R {row.runs} · RBI {row.rbis} · E {row.errors}
+                          </Text>
+                          {row.atBats.length > 0 ? (
+                            row.atBats.map((turn) => (
+                              <Text
+                                key={`own-at-bat-${row.identificationNumber}-${turn.sequence}`}
+                                style={styles.managerRosterListRow}
+                              >
+                                {'  '}Inning {turn.inning} · {turn.description}
+                                {turn.runsScored > 0 ? ` · ${turn.runsScored} carrera(s)` : ''}
+                              </Text>
+                            ))
+                          ) : (
+                            <Text style={styles.managerRosterListRow}>{'  '}Sin turnos al bate registrados.</Text>
+                          )}
+                          {row.errorEvents.map((error) => (
+                            <Text
+                              key={`own-error-${row.identificationNumber}-${error.sequence}`}
+                              style={styles.managerRosterListRow}
+                            >
+                              {'  '}Error en inning {error.inning} · {error.description}
+                            </Text>
+                          ))}
+                        </View>
+                      ))
+                    ) : (
+                      <Text style={styles.managerRosterListRow}>No hay jugadores en el lineup propio.</Text>
+                    )}
+                  </View>
+
+                  {managerTacticalSummary.rivalTeamId ? (
+                    <View style={styles.managerRosterListCard}>
+                      <Text style={styles.managerRosterListTitle}>
+                        {managerTacticalSummary.rivalTeamId} · turnos y defensa
+                      </Text>
+                      {managerTacticalSummary.rivalScorecard.length > 0 ? (
+                        managerTacticalSummary.rivalScorecard.map((row) => (
+                          <View key={`rival-scorecard-${row.identificationNumber}`}>
+                            <Text style={styles.managerRosterListRow}>
+                              {row.battingOrder === null ? row.lineupRole : `#${row.battingOrder}`} · Camiseta {row.jerseyNumber || '—'} · {row.displayName} · {row.fieldPosition} · PA {row.plateAppearances} · H {row.hits} · AVG {formatBattingAverage(row.hits, row.atBatsCount)} · BB {row.walks} · K {row.strikeouts} · R {row.runs} · RBI {row.rbis} · E {row.errors}
+                            </Text>
+                            {row.atBats.length > 0 ? (
+                              row.atBats.map((turn) => (
+                                <Text
+                                  key={`rival-at-bat-${row.identificationNumber}-${turn.sequence}`}
+                                  style={styles.managerRosterListRow}
+                                >
+                                  {'  '}Inning {turn.inning} · {turn.description}
+                                  {turn.runsScored > 0 ? ` · ${turn.runsScored} carrera(s)` : ''}
+                                </Text>
+                              ))
+                            ) : (
+                              <Text style={styles.managerRosterListRow}>{'  '}Sin turnos al bate registrados.</Text>
+                            )}
+                            {row.errorEvents.map((error) => (
+                              <Text
+                                key={`rival-error-${row.identificationNumber}-${error.sequence}`}
+                                style={styles.managerRosterListRow}
+                              >
+                                {'  '}Error en inning {error.inning} · {error.description}
+                              </Text>
+                            ))}
+                          </View>
+                        ))
+                      ) : (
+                        <Text style={styles.managerRosterListRow}>El rival aun no tiene lineup registrado.</Text>
+                      )}
+                    </View>
+                  ) : null}
+
                   <View style={styles.managerRosterListCard}>
                     <Text style={styles.managerRosterListTitle}>
                       Turnos de mi equipo ({managerTacticalSummary.ownTeamId})
@@ -3233,7 +2960,7 @@ export default function App() {
                     {managerTacticalSummary.ownRecentTurns.length > 0 ? (
                       managerTacticalSummary.ownRecentTurns.map((turn) => (
                         <Text key={`own-turn-${turn.sequence}`} style={styles.managerRosterListRow}>
-                          Tu equipo · #{turn.sequence} · {turn.description}
+                          Tu equipo · Inning {turn.inning} · {turn.description}
                         </Text>
                       ))
                     ) : (
@@ -3243,7 +2970,7 @@ export default function App() {
                     {managerTacticalSummary.rivalRecentTurns.length > 0 ? (
                       managerTacticalSummary.rivalRecentTurns.map((turn) => (
                         <Text key={`riv-turn-${turn.sequence}`} style={styles.managerRosterListRow}>
-                          Rival · #{turn.sequence} · {turn.description}
+                          Rival · Inning {turn.inning} · {turn.description}
                         </Text>
                       ))
                     ) : (
@@ -3529,7 +3256,7 @@ export default function App() {
 
                     <Pressable style={styles.profileManagerIconButton} onPress={openManagerLineupSummary}>
                       <Text style={styles.profileManagerIconBadge}>RS</Text>
-                      <Text style={styles.profileManagerIconLabel}>Resumen tactico</Text>
+                      <Text style={styles.profileManagerIconLabel}>Hoja de juego</Text>
                     </Pressable>
 
                     <Pressable style={styles.profileManagerIconButton} onPress={openManagerRivalLineupViewer}>
@@ -4451,6 +4178,26 @@ const styles = StyleSheet.create({
   managerRosterListRow: {
     color: '#446073',
     fontSize: 12,
+    marginBottom: 4
+  },
+  managerTacticalAlertCard: {
+    marginTop: 8,
+    backgroundColor: '#e7f2f7',
+    borderColor: '#b9d2df',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 9
+  },
+  managerTacticalAlertTitle: {
+    color: '#1c3a4d',
+    fontWeight: '800',
+    fontSize: 12,
+    marginBottom: 5
+  },
+  managerTacticalAlertText: {
+    color: '#24485d',
+    fontSize: 12,
+    lineHeight: 17,
     marginBottom: 4
   },
   lineupEntryListCard: {

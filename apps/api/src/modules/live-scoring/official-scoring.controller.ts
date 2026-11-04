@@ -10,6 +10,7 @@ import {
   Sse
 } from '@nestjs/common';
 import { Observable, map } from 'rxjs';
+import type { PresentOfficial, RunReview } from '@playsport/shared';
 import {
   GameAuthorizationCommand,
   GameLineupCommand,
@@ -97,12 +98,17 @@ type GameLineupBody = {
   managerId: string;
   playerIdentificationNumbers?: string[];
   playerIds?: string[];
+  courtesyRunnerSource?: 'BENCH' | 'ROSTER';
+  presentSubstituteIdentificationNumbers?: string[];
+  presentOfficials?: PresentOfficial[];
   lineupEntries?: Array<{
     identificationNumber?: string;
     playerIdentificationNumber?: string;
     playerId?: string;
-    battingOrder: number;
+    battingOrder: number | null;
     fieldPosition: string;
+    lineupRole?: 'PLAYER' | 'DP' | 'FLEX' | 'EH';
+    jerseyNumber?: string;
   }>;
 };
 
@@ -130,6 +136,7 @@ type PlayEventBody = {
   toBase?: number;
   runsScored?: number;
   outsRecorded?: number;
+  errorOuts?: number;
   note?: string;
 };
 
@@ -142,6 +149,12 @@ type OfficialUpdateBody = {
   patch?: OfficialScoringPatch;
   plateAppearance?: PlateAppearanceBody;
   playEvent?: PlayEventBody;
+  runReview?: RunReview;
+  expectedOfficialVersion?: number;
+  scorecardCommand?: unknown;
+  undoLast?: boolean;
+  regulationInnings?: 7 | 9;
+  lastErrorOuts?: number | null;
 };
 
 @Controller('official-scoring')
@@ -199,6 +212,14 @@ export class OfficialScoringController {
     };
 
     return this.officialScoringService.configureTournamentSubscription(command);
+  }
+
+  @Post('tournaments/:tournamentId/rules')
+  configureTournamentRules(
+    @Param('tournamentId') tournamentId: string,
+    @Body() body: { organizerId: string; courtesyRunnerSource: 'BENCH' | 'ROSTER' }
+  ) {
+    return this.officialScoringService.configureTournamentRules({ ...body, tournamentId });
   }
 
   @Get('tournaments/:tournamentId/authorization')
@@ -301,13 +322,40 @@ export class OfficialScoringController {
     return this.officialScoringService.configureGameTeams(command);
   }
 
+  @Post('games/:gameId/teams/:teamId/representative')
+  authorizeFieldRepresentative(
+    @Param('gameId') gameId: string,
+    @Param('teamId') teamId: string,
+    @Body() body: { tournamentId: string; managerId: string; identificationNumber: string }
+  ) {
+    return this.officialScoringService.authorizeFieldRepresentative({
+      gameId, teamId,
+      tournamentId: body.tournamentId,
+      managerId: body.managerId,
+      identificationNumber: body.identificationNumber
+    });
+  }
+
+  @Get('games/:gameId/teams/:teamId/representative')
+  getFieldRepresentative(
+    @Param('gameId') gameId: string,
+    @Param('teamId') teamId: string,
+    @Query('tournamentId') tournamentId: string
+  ) {
+    return this.officialScoringService.getFieldRepresentative(
+      gameId, this.requireQuery(tournamentId, 'tournamentId'), teamId
+    );
+  }
+
   @Post('games/:gameId/lineups')
   configureGameLineup(@Param('gameId') gameId: string, @Body() body: GameLineupBody) {
     const lineupEntries = body.lineupEntries?.map((entry) => ({
       identificationNumber:
         entry.identificationNumber ?? entry.playerIdentificationNumber ?? entry.playerId ?? '',
       battingOrder: entry.battingOrder,
-      fieldPosition: entry.fieldPosition
+      fieldPosition: entry.fieldPosition,
+      lineupRole: entry.lineupRole,
+      jerseyNumber: entry.jerseyNumber
     }));
 
     const command: GameLineupCommand = {
@@ -316,6 +364,9 @@ export class OfficialScoringController {
       teamId: body.teamId,
       managerId: body.managerId,
       playerIdentificationNumbers: body.playerIdentificationNumbers ?? body.playerIds ?? [],
+      courtesyRunnerSource: body.courtesyRunnerSource,
+      presentSubstituteIdentificationNumbers: body.presentSubstituteIdentificationNumbers,
+      presentOfficials: body.presentOfficials,
       lineupEntries
     };
 
@@ -333,6 +384,39 @@ export class OfficialScoringController {
       this.requireQuery(tournamentId, 'tournamentId'),
       visibility
     );
+  }
+
+  @Get('games/:gameId/team-sheets')
+  getTeamSheets(@Param('gameId') gameId: string, @Query('tournamentId') tournamentId: string,
+    @Query('userId') userId: string, @Query('role') role: AppRole) {
+    return this.officialScoringService.getTeamSheets(gameId, this.requireQuery(tournamentId, 'tournamentId'),
+      this.requireQuery(userId, 'userId'), this.requireRole(role));
+  }
+
+  @Sse('games/:gameId/team-sheets/stream')
+  streamTeamSheets(@Param('gameId') gameId: string, @Query('tournamentId') tournamentId: string,
+    @Query('userId') userId: string, @Query('role') role: AppRole): Observable<MessageEvent> {
+    return this.officialScoringService.createTeamSheetStream(gameId, this.requireQuery(tournamentId, 'tournamentId'),
+      this.requireQuery(userId, 'userId'), this.requireRole(role)).pipe(map((data) => ({ data })));
+  }
+
+  @Post('games/:gameId/team-sheets/:teamId/requests')
+  requestPersonnelChange(@Param('gameId') gameId: string, @Param('teamId') teamId: string,
+    @Body() body: { tournamentId: string; managerId: string; expectedRevision: number; action: unknown }) {
+    return this.officialScoringService.requestPersonnelChange({ ...body, gameId, teamId });
+  }
+
+  @Post('games/:gameId/personnel-requests/:requestId/decision')
+  decidePersonnelChange(@Param('gameId') gameId: string, @Param('requestId') requestId: string,
+    @Body() body: { tournamentId: string; actorId: string; actorRole: AppRole; decision: 'approve' | 'reject'; expectedRevision: number; note?: string }) {
+    return this.officialScoringService.decidePersonnelChange({ ...body, gameId, requestId });
+  }
+
+  @Post('games/:gameId/team-sheets/:teamId/official-changes')
+  recordPersonnelChange(@Param('gameId') gameId: string, @Param('teamId') teamId: string,
+    @Body() body: { tournamentId: string; actorId: string; actorRole: AppRole;
+      expectedRevision: number; expectedOfficialVersion: number; action: unknown }) {
+    return this.officialScoringService.recordPersonnelChange({ ...body, gameId, teamId });
   }
 
   @Get('games/:gameId/permissions')
@@ -398,6 +482,7 @@ export class OfficialScoringController {
           toBase: body.playEvent.toBase,
           runsScored: body.playEvent.runsScored,
           outsRecorded: body.playEvent.outsRecorded,
+          errorOuts: body.playEvent.errorOuts,
           note: body.playEvent.note
         }
       : undefined;
@@ -411,7 +496,11 @@ export class OfficialScoringController {
       note: body.note,
       patch: body.patch ?? {},
       plateAppearance,
-      playEvent
+      playEvent,
+      runReview: body.runReview,
+      expectedOfficialVersion: body.expectedOfficialVersion,
+      scorecardCommand: body.scorecardCommand, undoLast: body.undoLast,
+      regulationInnings: body.regulationInnings, lastErrorOuts: body.lastErrorOuts
     };
 
     return this.officialScoringService.submitOfficialUpdate(command);

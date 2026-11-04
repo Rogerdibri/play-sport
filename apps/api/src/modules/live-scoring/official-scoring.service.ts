@@ -1,4 +1,12 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import type { PersonnelAction, PersonnelRequest, PresentOfficial, TeamSheetPlayer, TeamSheetsSnapshot } from '@playsport/shared';
+import {
+  accountRuns, createRunAccounting, findDuplicateFieldPosition, lineupFieldPositions,
+  reviewAccountedRun, runTotals, validRunEvidence, validRunReview,
+  applyPrivateCommand, isScorecardCommand, minimumDestinations,
+  type AccountedRun, type RunAccounting, type RunReview, type PrivateCommand,
+  type PrivateState, type PrivatePlayer, type PrivateLog, type PlayResult
+} from '@playsport/shared';
 import { Observable, Subject } from 'rxjs';
 
 type OfficialActorRole = 'organizer' | 'scorekeeper';
@@ -30,13 +38,18 @@ export type PlayEventType =
   | 'WILD_PITCH'
   | 'PASSED_BALL'
   | 'RUN_SCORED'
+  | 'COURTESY_RUNNER'
   | 'ERROR'
+  | 'ERROR_ADVANCE'
+  | 'RUNNER_ADVANCE'
+  | 'DROPPED_FOUL'
   | 'DOUBLE_PLAY'
   | 'TRIPLE_PLAY'
   | 'FORCE_OUT'
   | 'PICKOFF'
   | 'BALK'
-  | 'BUNT';
+  | 'BUNT'
+  | 'RUNNER_OUT';
 
 export type PlayEventInput = {
   type: PlayEventType;
@@ -50,6 +63,7 @@ export type PlayEventInput = {
   runsScored?: number;
   outsRecorded?: number;
   note?: string;
+  errorOuts?: number;
 };
 
 export type OfficialScoringPatch = {
@@ -112,6 +126,7 @@ type TournamentTeamRosterRecord = {
 
 type TournamentAuthorizationRecord = {
   tournamentId: string;
+  courtesyRunnerSource: 'BENCH' | 'ROSTER';
   organizerId: string;
   subscriptionTier: SubscriptionTier;
   authorizedScorekeepers: Set<string>;
@@ -138,8 +153,10 @@ type OfficialGameState = {
 
 type LineupEntryRecord = {
   identificationNumber: string;
-  battingOrder: number;
+  battingOrder: number | null;
   fieldPosition: string;
+  lineupRole: 'PLAYER' | 'DP' | 'FLEX' | 'EH';
+  jerseyNumber: string | null;
 };
 
 type GameLineupRecord = {
@@ -166,6 +183,7 @@ type BatterStatsRecord = {
   triples: number;
   homeRuns: number;
   walks: number;
+  hitByPitch: number;
   strikeouts: number;
   runs: number;
   rbis: number;
@@ -196,7 +214,9 @@ type FieldingStatsRecord = {
 
 type OfficialPlayEventRecord = {
   sequence: number;
+  inning: number;
   type: PlayEventType;
+  battingTeamId: string;
   offenseTeamId: string;
   defenseTeamId: string | null;
   batterIdentificationNumber: string | null;
@@ -216,24 +236,72 @@ type OfficialPlayEventRecord = {
   description: string;
   note: string | null;
   timestamp: string;
+  errorOuts: number | null;
+  scoredRunnerIds: string[];
+};
+
+type CompletedPlateAppearanceRecord = {
+  sequence: number;
+  inning: number;
+  offenseTeamId: string;
+  batterIdentificationNumber: string;
+  result: string;
+  description: string;
+  runsScored: number;
 };
 
 type PlayByPlayRecord = {
+  scorecardLog: PrivateLog[];
+  courtesyFor: Record<string, string>;
   sequence: number;
+  plateAppearanceSequence: number;
+  plateAppearances: CompletedPlateAppearanceRecord[];
   baseRunners: BaseRunnersRecord;
   batterStatsByIdentification: Map<string, BatterStatsRecord>;
   pitcherStatsByIdentification: Map<string, PitcherStatsRecord>;
   fieldingStatsByIdentification: Map<string, FieldingStatsRecord>;
   events: OfficialPlayEventRecord[];
+  runAccounting: RunAccounting;
+};
+
+type FieldRepresentativeRecord = {
+  identificationNumber: string;
+  authorizedByManagerId: string;
+  authorizedAt: string;
+};
+
+type FieldRepresentativeProjection = FieldRepresentativeRecord & {
+  displayName: string;
 };
 
 type OfficialGameRecord = {
+  regulationInnings?: 7 | 9;
+  scoringHistory: Array<{
+    state: OfficialGameState;
+    playByPlay: PlayByPlayRecord;
+    indexes: Map<string, number>;
+    command?: PrivateCommand;
+  }>;
   gameId: string;
   tournamentId: string;
   hasGameScopedAuthorization: boolean;
   gameAuthorizedScorekeepers: Set<string>;
   teams: { homeTeamId: string; awayTeamId: string } | null;
   lineups: Map<string, GameLineupRecord>;
+  fieldRepresentatives: Map<string, FieldRepresentativeRecord>;
+  teamSheets: Map<string, {
+    teamId: string;
+    managerId: string;
+    revision: number;
+    presentPlayers: string[];
+    presentOfficials: PresentOfficial[];
+    initialLineup: LineupEntryRecord[];
+    initialSignature: string;
+    submittedAt: string;
+    updatedAt: string;
+  }>;
+  personnelRequests: PersonnelRequest[];
+  personnelVersion: number;
   officialState: OfficialGameState;
   playByPlay: PlayByPlayRecord;
   events: OfficialScoringStreamPayload[];
@@ -255,6 +323,7 @@ type PlayerProjection = PlayerFreeProjection | PlayerPaidProjection;
 type LineupProjection = {
   teams: { homeTeamId: string; awayTeamId: string } | null;
   visibility: SubscriptionTier;
+  fieldRepresentatives: Array<FieldRepresentativeProjection & { teamId: string }>;
   lineups: Array<{
     teamId: string;
     managerId: string;
@@ -263,10 +332,13 @@ type LineupProjection = {
     lineupEntries: Array<{
       identificationNumber: string;
       playerId: string;
-      battingOrder: number;
+      battingOrder: number | null;
       fieldPosition: string;
+      lineupRole: 'PLAYER' | 'DP' | 'FLEX' | 'EH';
+      jerseyNumber: string | null;
       player: PlayerProjection | null;
     }>;
+    courtesyRunnerSource: 'BENCH' | 'ROSTER';
     lineupPlayers: PlayerProjection[];
     currentBatterIndex: number;
     currentBatterIdentificationNumber: string | null;
@@ -278,9 +350,29 @@ type LineupProjection = {
 };
 
 type PlayByPlayProjection = {
+  scorecard: PrivateState;
+  canUndo: boolean;
+  lastScorecardCommand: PrivateCommand | null;
+  runAccounting: { runs: AccountedRun[]; totals: ReturnType<typeof runTotals>; scoreMatches: boolean };
   baseRunners: BaseRunnersRecord;
   totalEvents: number;
   recentEvents: OfficialPlayEventRecord[];
+  plateAppearances: Array<{
+    sequence: number;
+    inning: number;
+    offenseTeamId: string;
+    batterIdentificationNumber: string;
+    result: string;
+    description: string;
+    runsScored: number;
+  }>;
+  fieldingErrors: Array<{
+    sequence: number;
+    inning: number;
+    defenseTeamId: string | null;
+    fielderIdentificationNumber: string;
+    description: string;
+  }>;
   batterStats: Array<
     BatterStatsRecord & {
       identificationNumber: string;
@@ -290,6 +382,9 @@ type PlayByPlayProjection = {
   >;
   pitcherStats: Array<
     PitcherStatsRecord & {
+      earnedRuns: number;
+      unearnedRuns: number;
+      pendingRuns: number;
       identificationNumber: string;
       playerId: string;
       player: PlayerProjection | null;
@@ -340,6 +435,11 @@ export type OfficialScoringUpdateEvent = {
     nextBatterId: string | null;
   } | null;
   playEvent: OfficialPlayEventRecord | null;
+  runReview?: RunReview;
+  scorecardCommand?: PrivateCommand;
+  undoLast?: boolean;
+  regulationInnings?: 7 | 9;
+  lastErrorOuts?: number | null;
   lineup: LineupProjection;
   playByPlay: PlayByPlayProjection;
   timestamp: string;
@@ -405,9 +505,14 @@ export type GameLineupCommand = {
   playerIdentificationNumbers?: string[];
   lineupEntries?: Array<{
     identificationNumber: string;
-    battingOrder: number;
+    battingOrder: number | null;
     fieldPosition: string;
+    lineupRole?: 'PLAYER' | 'DP' | 'FLEX' | 'EH';
+    jerseyNumber?: string;
   }>;
+  courtesyRunnerSource?: 'BENCH' | 'ROSTER';
+  presentSubstituteIdentificationNumbers?: string[];
+  presentOfficials?: PresentOfficial[];
 };
 
 export type OfficialUpdateCommand = {
@@ -420,6 +525,12 @@ export type OfficialUpdateCommand = {
   patch: OfficialScoringPatch;
   plateAppearance?: PlateAppearanceInput;
   playEvent?: PlayEventInput;
+  runReview?: RunReview;
+  expectedOfficialVersion?: number;
+  scorecardCommand?: unknown;
+  undoLast?: boolean;
+  regulationInnings?: 7 | 9;
+  lastErrorOuts?: number | null;
 };
 
 export type GamePermissionsInput = {
@@ -435,6 +546,7 @@ export class OfficialScoringService {
   private readonly globalPlayersByIdentification = new Map<string, RegisteredPlayerRecord>();
   private readonly games = new Map<string, OfficialGameRecord>();
   private readonly streams = new Map<string, Subject<OfficialScoringStreamPayload>>();
+  private readonly personnelStreams = new Map<string, Subject<void>>();
 
   configureTournamentAuthorization(command: TournamentAuthorizationCommand) {
     const tournamentId = this.requireText(command.tournamentId, 'tournamentId');
@@ -454,6 +566,7 @@ export class OfficialScoringService {
       tournamentId,
       organizerId,
       subscriptionTier,
+      courtesyRunnerSource: existing?.courtesyRunnerSource ?? 'BENCH',
       authorizedScorekeepers: new Set(scorekeeperIds),
       teamRosters: existing?.teamRosters ?? new Map<string, TournamentTeamRosterRecord>(),
       updatedAt: this.nowIso()
@@ -481,6 +594,24 @@ export class OfficialScoringService {
 
   getTournamentAuthorization(tournamentIdRaw: string) {
     const tournament = this.getTournamentOrThrow(tournamentIdRaw);
+    return this.serializeTournamentAuthorization(tournament);
+  }
+
+  configureTournamentRules(command: {
+    tournamentId: string;
+    organizerId: string;
+    courtesyRunnerSource: 'BENCH' | 'ROSTER';
+  }) {
+    const tournament = this.getTournamentOrThrow(command.tournamentId);
+    const organizerId = this.requireText(command.organizerId, 'organizerId');
+    if (tournament.organizerId !== organizerId) {
+      throw new ForbiddenException('Solo el organizador oficial puede cambiar las reglas del torneo.');
+    }
+    if (command.courtesyRunnerSource !== 'BENCH' && command.courtesyRunnerSource !== 'ROSTER') {
+      throw new BadRequestException('courtesyRunnerSource debe ser BENCH o ROSTER.');
+    }
+    tournament.courtesyRunnerSource = command.courtesyRunnerSource;
+    tournament.updatedAt = this.nowIso();
     return this.serializeTournamentAuthorization(tournament);
   }
 
@@ -629,6 +760,9 @@ export class OfficialScoringService {
 
     const tournament = this.getTournamentOrThrow(tournamentId);
     const isOrganizerOverride = organizerId !== null && organizerId === tournament.organizerId;
+    if (!isOrganizerOverride) {
+      throw new ForbiddenException('Solo el organizador puede aprobar o modificar el roster oficial.');
+    }
     const existingRoster = tournament.teamRosters.get(teamId);
 
     if (existingRoster && existingRoster.managerId !== managerId && !isOrganizerOverride) {
@@ -648,6 +782,12 @@ export class OfficialScoringService {
     }
 
     this.assertPlayersNotInOtherTeamRoster(tournament, teamId, playerIdentificationNumbers);
+    for (const game of this.games.values()) {
+      if (game.tournamentId === tournamentId && game.officialState.status !== 'final' &&
+          game.lineups.get(teamId)?.lineupEntries.some((entry) => !playerIdentificationNumbers.includes(entry.identificationNumber))) {
+        throw new ConflictException('No puedes retirar del roster a un jugador de una alineación entregada. Registra primero su cambio oficial.');
+      }
+    }
 
     const roster: TournamentTeamRosterRecord = {
       tournamentId,
@@ -659,6 +799,17 @@ export class OfficialScoringService {
 
     tournament.teamRosters.set(teamId, roster);
     tournament.updatedAt = roster.updatedAt;
+    for (const game of this.games.values()) {
+      if (game.tournamentId !== tournamentId || game.officialState.status === 'final') continue;
+      const representative = game.fieldRepresentatives.get(teamId);
+      if (
+        representative &&
+        (!roster.playerIdentificationNumbers.has(representative.identificationNumber) ||
+          roster.managerId !== representative.authorizedByManagerId)
+      ) {
+        game.fieldRepresentatives.delete(teamId);
+      }
+    }
 
     return {
       tournamentId,
@@ -786,6 +937,10 @@ export class OfficialScoringService {
     this.getTeamRosterOrThrow(tournament, awayTeamId);
 
     const game = this.getOrCreateGame(gameId, tournamentId);
+    if (game.teamSheets.size > 0 && game.teams &&
+        (game.teams.homeTeamId !== homeTeamId || game.teams.awayTeamId !== awayTeamId)) {
+      throw new ConflictException('No se pueden cambiar los participantes después de entregar una alineación.');
+    }
     game.teams = { homeTeamId, awayTeamId };
 
     if (!game.officialState.offenseTeamId) {
@@ -800,6 +955,68 @@ export class OfficialScoringService {
       teams: game.teams,
       lineup: this.serializeLineupStatus(game, tournament)
     };
+  }
+
+  authorizeFieldRepresentative(command: {
+    gameId: string;
+    tournamentId: string;
+    teamId: string;
+    managerId: string;
+    identificationNumber: string;
+  }) {
+    const tournament = this.getTournamentOrThrow(command.tournamentId);
+    const teamId = this.requireText(command.teamId, 'teamId');
+    const roster = this.getTeamRosterOrThrow(tournament, teamId);
+    const managerId = this.requireText(command.managerId, 'managerId');
+    if (roster.managerId !== managerId) {
+      throw new ForbiddenException('Solo el dirigente del equipo puede autorizar a su representante en el campo.');
+    }
+    const game = this.getOrCreateGame(command.gameId, tournament.tournamentId);
+    if (!game.teams || ![game.teams.homeTeamId, game.teams.awayTeamId].includes(teamId)) {
+      throw new BadRequestException('El equipo no participa en este partido.');
+    }
+    if (game.officialState.status === 'final') {
+      throw new BadRequestException('No se puede cambiar al representante de un partido finalizado.');
+    }
+    const identificationNumber = this.normalizeIdentificationNumber(command.identificationNumber, 'cedula');
+    if (!roster.playerIdentificationNumbers.has(identificationNumber)) {
+      throw new BadRequestException('El representante debe pertenecer a la plantilla oficial del equipo.');
+    }
+    if (!this.globalPlayersByIdentification.has(identificationNumber)) {
+      throw new BadRequestException('La cédula no existe en el registro global.');
+    }
+    game.fieldRepresentatives.set(teamId, {
+      identificationNumber,
+      authorizedByManagerId: managerId,
+      authorizedAt: this.nowIso()
+    });
+    return this.getFieldRepresentative(game.gameId, tournament.tournamentId, teamId);
+  }
+
+  getFieldRepresentative(gameId: string, tournamentId: string, teamIdRaw: string) {
+    const tournament = this.getTournamentOrThrow(tournamentId);
+    const teamId = this.requireText(teamIdRaw, 'teamId');
+    this.getTeamRosterOrThrow(tournament, teamId);
+    const game = this.getOrCreateGame(gameId, tournament.tournamentId);
+    if (!game.teams || ![game.teams.homeTeamId, game.teams.awayTeamId].includes(teamId)) {
+      throw new BadRequestException('El equipo no participa en este partido.');
+    }
+    return {
+      gameId: game.gameId,
+      tournamentId: game.tournamentId,
+      teamId,
+      representative: this.serializeFieldRepresentative(game, teamId)
+    };
+  }
+
+  private serializeFieldRepresentative(game: OfficialGameRecord, teamId: string): FieldRepresentativeProjection | null {
+    const representative = game.fieldRepresentatives.get(teamId);
+    if (!representative) return null;
+    const player = this.globalPlayersByIdentification.get(representative.identificationNumber);
+    if (!player) {
+      throw new NotFoundException('El representante autorizado no existe en el registro global.');
+    }
+    return { ...representative, displayName: player.displayName };
   }
 
   configureGameLineup(command: GameLineupCommand) {
@@ -821,8 +1038,13 @@ export class OfficialScoringService {
       normalizedFallback,
       'lineupEntries'
     );
+    if (command.courtesyRunnerSource !== undefined) {
+      throw new ForbiddenException('El manager no puede definir reglas. Las configura el organizador del torneo.');
+    }
 
-    const playerIdentificationNumbers = lineupEntries.map((entry) => entry.identificationNumber);
+    const playerIdentificationNumbers = lineupEntries
+      .filter((entry) => entry.battingOrder !== null)
+      .map((entry) => entry.identificationNumber);
 
     const tournament = this.getTournamentOrThrow(tournamentId);
     const teamRoster = this.getTeamRosterOrThrow(tournament, teamId);
@@ -831,7 +1053,7 @@ export class OfficialScoringService {
       throw new ForbiddenException(`El manager ${managerId} no esta autorizado para el equipo ${teamId}.`);
     }
 
-    for (const identificationNumber of playerIdentificationNumbers) {
+    for (const identificationNumber of lineupEntries.map((entry) => entry.identificationNumber)) {
       if (!teamRoster.playerIdentificationNumbers.has(identificationNumber)) {
         throw new BadRequestException(
           `La cedula ${identificationNumber} no pertenece al roster oficial del equipo ${teamId}.`
@@ -853,6 +1075,24 @@ export class OfficialScoringService {
     if (teamId !== game.teams.homeTeamId && teamId !== game.teams.awayTeamId) {
       throw new BadRequestException(`El equipo ${teamId} no participa en el juego ${gameId}.`);
     }
+    this.assertPersonnelOpen(game);
+    const substitutes = command.presentSubstituteIdentificationNumbers === undefined ||
+      Array.isArray(command.presentSubstituteIdentificationNumbers) && command.presentSubstituteIdentificationNumbers.length === 0 ? [] :
+      this.sanitizeIdentificationList(command.presentSubstituteIdentificationNumbers, 'suplentes presentes');
+    const officials = this.sanitizePresentOfficials(command.presentOfficials ?? []);
+    for (const id of substitutes) {
+      if (!teamRoster.playerIdentificationNumbers.has(id) || lineupEntries.some((entry) => entry.identificationNumber === id)) {
+        throw new BadRequestException('Los suplentes presentes deben estar inscritos y no pertenecer a la alineación inicial.');
+      }
+    }
+    const signature = JSON.stringify({ lineupEntries, substitutes: [...substitutes].sort(), officials });
+    const existingSheet = game.teamSheets.get(teamId);
+    if (existingSheet) {
+      if (existingSheet.initialSignature !== signature) {
+        throw new ConflictException('La alineación ya fue entregada. Los cambios requieren confirmación del anotador u organizador.');
+      }
+      return { gameId, tournamentId, lineup: this.serializeLineupStatus(game, tournament) };
+    }
 
     const lineup: GameLineupRecord = {
       teamId,
@@ -864,10 +1104,17 @@ export class OfficialScoringService {
     };
 
     game.lineups.set(teamId, lineup);
+    game.teamSheets.set(teamId, {
+      teamId, managerId, revision: 1,
+      presentPlayers: [...lineupEntries.map((entry) => entry.identificationNumber), ...substitutes],
+      presentOfficials: officials, initialLineup: structuredClone(lineupEntries), initialSignature: signature,
+      submittedAt: lineup.updatedAt, updatedAt: lineup.updatedAt
+    });
 
     if (game.officialState.offenseTeamId === teamId) {
       game.officialState.nextBatterId = playerIdentificationNumbers[0] ?? null;
     }
+    this.publishPersonnel(game, tournament);
 
     return {
       gameId,
@@ -889,6 +1136,351 @@ export class OfficialScoringService {
     };
   }
 
+  getTeamSheets(gameId: string, tournamentId: string, userIdRaw: string, role: AppRole): TeamSheetsSnapshot {
+    const tournament = this.getTournamentOrThrow(tournamentId);
+    const game = this.getOrCreateGame(gameId, tournament.tournamentId);
+    const userId = this.requireText(userIdRaw, 'usuario');
+    const teams = game.teams ? [game.teams.homeTeamId, game.teams.awayTeamId] : [];
+    const ownTeamId = role === 'manager' ?
+      teams.find((id) => tournament.teamRosters.get(id)?.managerId === userId) ?? null : null;
+    const canDecide = this.canWriteOfficial(game, tournament, userId, role);
+    if (!ownTeamId && !canDecide) throw new ForbiddenException('Solo los dirigentes participantes y los oficiales autorizados pueden consultar esta entrega.');
+    const player = (entry: LineupEntryRecord): TeamSheetPlayer => ({
+      ...entry, displayName: this.globalPlayersByIdentification.get(entry.identificationNumber)?.displayName ?? entry.identificationNumber
+    });
+    return {
+      gameId: game.gameId, tournamentId: game.tournamentId, version: game.personnelVersion, canDecide, ownTeamId,
+      sheets: Array.from(game.teamSheets.values()).map((sheet) => {
+        const lineup = game.lineups.get(sheet.teamId);
+        if (!lineup) throw new NotFoundException('No se encontró la alineación de la entrega.');
+        return {
+          teamId: sheet.teamId, managerId: sheet.managerId, revision: sheet.revision,
+          lineup: lineup.lineupEntries.map(player), initialLineup: sheet.initialLineup.map(player),
+          presentSubstitutes: sheet.presentPlayers.filter((id) => !lineup.lineupEntries.some((entry) => entry.identificationNumber === id)).map((id) => ({
+            identificationNumber: id, displayName: this.globalPlayersByIdentification.get(id)?.displayName ?? id
+          })),
+          presentOfficials: structuredClone(sheet.presentOfficials),
+          representative: this.serializeFieldRepresentative(game, sheet.teamId),
+          submittedAt: sheet.submittedAt, updatedAt: sheet.updatedAt,
+          recipients: [
+            { userId: tournament.organizerId, role: 'organizer' as const },
+            ...Array.from(tournament.authorizedScorekeepers).filter((id) => this.canWriteOfficial(game, tournament, id, 'scorekeeper')).map((id) => ({
+              userId: id, role: 'scorekeeper' as const
+            })),
+            ...teams.filter((id) => id !== sheet.teamId).map((id) => ({
+              userId: this.getTeamRosterOrThrow(tournament, id).managerId, role: 'manager' as const
+            }))
+          ]
+        };
+      }),
+      requests: structuredClone(game.personnelRequests)
+    };
+  }
+
+  createTeamSheetStream(gameId: string, tournamentId: string, userId: string, role: AppRole): Observable<TeamSheetsSnapshot> {
+    this.getTeamSheets(gameId, tournamentId, userId, role);
+    let stream = this.personnelStreams.get(gameId);
+    if (!stream) {
+      stream = new Subject<void>();
+      this.personnelStreams.set(gameId, stream);
+    }
+    const source = stream;
+    return new Observable((subscriber) => {
+      const emit = () => {
+        try { subscriber.next(this.getTeamSheets(gameId, tournamentId, userId, role)); }
+        catch (error) { subscriber.error(error); }
+      };
+      const subscription = source.subscribe(emit);
+      emit();
+      return () => subscription.unsubscribe();
+    });
+  }
+
+  requestPersonnelChange(command: {
+    gameId: string; tournamentId: string; teamId: string; managerId: string;
+    expectedRevision: number; action: unknown;
+  }) {
+    const tournament = this.getTournamentOrThrow(command.tournamentId);
+    const game = this.getOrCreateGame(command.gameId, tournament.tournamentId);
+    const roster = this.getTeamRosterOrThrow(tournament, command.teamId);
+    if (roster.managerId !== command.managerId) throw new ForbiddenException('Solo el dirigente del equipo puede comunicar sus movimientos.');
+    this.getTeamSheets(game.gameId, game.tournamentId, command.managerId, 'manager');
+    this.assertPersonnelOpen(game);
+    const sheet = game.teamSheets.get(command.teamId);
+    if (!sheet) throw new BadRequestException('Envía la alineación inicial antes de solicitar movimientos.');
+    if (sheet.revision !== command.expectedRevision) throw new ConflictException('La entrega cambió. Actualiza los datos antes de enviar el movimiento.');
+    const action = this.sanitizePersonnelAction(command.action);
+    const duplicate = game.personnelRequests.find((request) => request.teamId === command.teamId &&
+      request.status === 'pending' && JSON.stringify(request.action) === JSON.stringify(action));
+    if (duplicate) return this.getTeamSheets(game.gameId, game.tournamentId, command.managerId, 'manager');
+    this.preparePersonnelChange(game, tournament, command.teamId, action);
+    game.personnelRequests.push({
+      id: `${game.gameId}:${game.personnelRequests.length + 1}`, teamId: command.teamId,
+      managerId: command.managerId, action, status: 'pending', requestedAt: this.nowIso(),
+      decidedAt: null, decidedBy: null, decisionNote: null, appliedRevision: null, courtesyRunnerSource: null
+    });
+    this.publishPersonnel(game, tournament);
+    return this.getTeamSheets(game.gameId, game.tournamentId, command.managerId, 'manager');
+  }
+
+  decidePersonnelChange(command: {
+    gameId: string; tournamentId: string; requestId: string; actorId: string;
+    actorRole: AppRole; decision: 'approve' | 'reject'; expectedRevision: number; note?: string;
+  }) {
+    const tournament = this.getTournamentOrThrow(command.tournamentId);
+    const game = this.getOrCreateGame(command.gameId, tournament.tournamentId);
+    if ((command.actorRole !== 'organizer' && command.actorRole !== 'scorekeeper') ||
+        !this.canWriteOfficial(game, tournament, command.actorId, command.actorRole)) {
+      throw new ForbiddenException('Solo el anotador u organizador autorizado puede confirmar movimientos.');
+    }
+    this.assertPersonnelOpen(game);
+    if (!['approve', 'reject'].includes(command.decision)) throw new BadRequestException('Selecciona confirmar o rechazar.');
+    const request = game.personnelRequests.find((entry) => entry.id === command.requestId);
+    if (!request) throw new NotFoundException('La solicitud no existe en este partido.');
+    if (request.status !== 'pending') {
+      if (request.status !== (command.decision === 'approve' ? 'approved' : 'rejected')) throw new ConflictException('La solicitud ya fue resuelta.');
+      return this.getTeamSheets(game.gameId, game.tournamentId, command.actorId, command.actorRole);
+    }
+    const sheet = game.teamSheets.get(request.teamId);
+    const lineup = game.lineups.get(request.teamId);
+    if (!sheet || !lineup) throw new NotFoundException('No se encontró la entrega del equipo.');
+    if (sheet.revision !== command.expectedRevision) throw new ConflictException('La entrega cambió. Revisa la versión actual antes de decidir.');
+    const note = command.note === undefined ? null : this.personnelText(command.note, 'nota', true) || null;
+    if (command.decision === 'reject' && !note) throw new BadRequestException('Indica el motivo del rechazo.');
+    if (command.decision === 'approve') {
+      this.applyPersonnelChange(game, tournament, request);
+    }
+    request.status = command.decision === 'approve' ? 'approved' : 'rejected';
+    request.decidedAt = this.nowIso();
+    request.decidedBy = { id: command.actorId, role: command.actorRole };
+    request.decisionNote = note;
+    this.publishPersonnel(game, tournament);
+    return this.getTeamSheets(game.gameId, game.tournamentId, command.actorId, command.actorRole);
+  }
+
+  recordPersonnelChange(command: {
+    gameId: string; tournamentId: string; teamId: string; actorId: string; actorRole: AppRole;
+    expectedRevision: number; expectedOfficialVersion: number; action: unknown;
+  }) {
+    const tournament = this.getTournamentOrThrow(command.tournamentId);
+    const game = this.getOrCreateGame(command.gameId, tournament.tournamentId);
+    if (!this.canWriteOfficial(game, tournament, command.actorId, command.actorRole) ||
+        (command.actorRole !== 'organizer' && command.actorRole !== 'scorekeeper')) {
+      throw new ForbiddenException('Solo el anotador u organizador autorizado puede registrar cambios.');
+    }
+    this.assertPersonnelOpen(game);
+    const sheet = game.teamSheets.get(command.teamId);
+    if (!sheet) throw new BadRequestException('Recibe primero el lineup de este equipo.');
+    if (sheet.revision !== command.expectedRevision || game.officialState.officialVersion !== command.expectedOfficialVersion) {
+      throw new ConflictException('El partido cambió. Actualiza la pizarra antes de registrar el movimiento.');
+    }
+    const action = this.sanitizePersonnelAction(command.action);
+    this.preparePersonnelChange(game, tournament, command.teamId, action);
+    const request: PersonnelRequest = {
+      id: `${game.gameId}:${game.personnelRequests.length + 1}`, teamId: command.teamId, managerId: sheet.managerId,
+      action, status: 'approved', requestedAt: this.nowIso(), decidedAt: this.nowIso(),
+      decidedBy: { id: command.actorId, role: command.actorRole },
+      decisionNote: 'Registrado directamente por el oficial del partido.', appliedRevision: null, courtesyRunnerSource: null
+    };
+    this.applyPersonnelChange(game, tournament, request);
+    game.personnelRequests.push(request);
+    this.publishPersonnel(game, tournament);
+    return this.getTeamSheets(game.gameId, game.tournamentId, command.actorId, command.actorRole);
+  }
+
+  private applyPersonnelChange(game: OfficialGameRecord, tournament: TournamentAuthorizationRecord, request: PersonnelRequest) {
+      const sheet = game.teamSheets.get(request.teamId)!;
+      const lineup = game.lineups.get(request.teamId)!;
+      const next = this.preparePersonnelChange(game, tournament, request.teamId, request.action);
+      if (request.action.kind === 'courtesy') {
+        const { outgoingIdentificationNumber: outgoing, incomingIdentificationNumber: incoming, fromBase } = request.action;
+        const bases = [game.playByPlay.baseRunners.first, game.playByPlay.baseRunners.second, game.playByPlay.baseRunners.third];
+        if (game.officialState.offenseTeamId !== request.teamId || bases[fromBase - 1] !== outgoing || bases.includes(incoming)) {
+          throw new BadRequestException('El corredor y la base deben coincidir con la pizarra oficial.');
+        }
+        const key = (['first', 'second', 'third'] as const)[fromBase - 1];
+        game.playByPlay.baseRunners[key] = incoming;
+        game.playByPlay.courtesyFor[incoming] = outgoing;
+        const owner = game.playByPlay.runAccounting.runners[outgoing];
+        if (owner) {
+          game.playByPlay.runAccounting.runners[incoming] = owner;
+          delete game.playByPlay.runAccounting.runners[outgoing];
+        }
+      }
+      lineup.lineupEntries = next.lineupEntries;
+      lineup.playerIdentificationNumbers = next.lineupEntries.filter((entry) => entry.battingOrder !== null).map((entry) => entry.identificationNumber);
+      lineup.updatedAt = this.nowIso();
+      sheet.presentPlayers = next.presentPlayers;
+      sheet.presentOfficials = next.presentOfficials;
+      sheet.revision += 1;
+      sheet.updatedAt = lineup.updatedAt;
+      request.appliedRevision = sheet.revision;
+      if (request.action.kind === 'courtesy') request.courtesyRunnerSource = tournament.courtesyRunnerSource;
+      if ((request.action.kind === 'substitution' || request.action.kind === 'courtesy') &&
+          game.officialState.offenseTeamId === request.teamId) {
+        const { outgoingIdentificationNumber: outgoing, incomingIdentificationNumber: incoming } = request.action;
+        for (const base of ['first', 'second', 'third'] as const) {
+          if (game.playByPlay.baseRunners[base] === outgoing) {
+            game.playByPlay.baseRunners[base] = incoming;
+            const runner = game.playByPlay.runAccounting.runners[outgoing];
+            if (runner) {
+              game.playByPlay.runAccounting.runners[incoming] = runner;
+              delete game.playByPlay.runAccounting.runners[outgoing];
+            }
+          }
+        }
+      }
+      if (game.officialState.offenseTeamId === request.teamId) {
+        game.officialState.nextBatterId = this.resolveNextBatterId(game, request.teamId);
+      }
+      game.scoringHistory = [];
+  }
+
+  private preparePersonnelChange(game: OfficialGameRecord, tournament: TournamentAuthorizationRecord, teamId: string, action: PersonnelAction) {
+    const sheet = game.teamSheets.get(teamId);
+    const lineup = game.lineups.get(teamId);
+    if (!sheet || !lineup) throw new NotFoundException('No se encontró la entrega del equipo.');
+    const roster = this.getTeamRosterOrThrow(tournament, teamId);
+    let entries = structuredClone(lineup.lineupEntries);
+    const presentPlayers = [...sheet.presentPlayers];
+    let presentOfficials = structuredClone(sheet.presentOfficials);
+    const registered = (id: string) => {
+      if (!roster.playerIdentificationNumbers.has(id) || !this.globalPlayersByIdentification.has(id)) {
+        throw new BadRequestException('El jugador debe pertenecer a la plantilla oficial de este equipo.');
+      }
+    };
+    const active = (id: string) => {
+      const entry = entries.find((player) => player.identificationNumber === id);
+      if (!entry) throw new BadRequestException('El jugador saliente no está en la alineación actual.');
+      return entry;
+    };
+    const reserve = (id: string) => {
+      registered(id);
+      if (!presentPlayers.includes(id) || entries.some((entry) => entry.identificationNumber === id)) {
+        throw new BadRequestException('El sustituto debe ser un suplente presente y confirmado.');
+      }
+    };
+    switch (action.kind) {
+      case 'arrival':
+        registered(action.identificationNumber);
+        if (presentPlayers.includes(action.identificationNumber)) throw new BadRequestException('El jugador ya está registrado como presente.');
+        presentPlayers.push(action.identificationNumber);
+        break;
+      case 'substitution': {
+        const outgoing = active(action.outgoingIdentificationNumber);
+        reserve(action.incomingIdentificationNumber);
+        entries = entries.map((entry) => entry === outgoing ? {
+          ...entry, identificationNumber: action.incomingIdentificationNumber,
+          fieldPosition: action.fieldPosition, jerseyNumber: action.jerseyNumber
+        } : entry);
+        break;
+      }
+      case 'defense': {
+        const player = active(action.identificationNumber);
+        const swap = ['DH', 'NA'].includes(action.fieldPosition) ? undefined :
+          entries.find((entry) => entry !== player && entry.fieldPosition === action.fieldPosition);
+        entries = entries.map((entry) => entry === player ? { ...entry, fieldPosition: action.fieldPosition } :
+          entry === swap ? { ...entry, fieldPosition: player.fieldPosition } : entry);
+        break;
+      }
+      case 'courtesy': {
+        const outgoing = active(action.outgoingIdentificationNumber);
+        registered(action.incomingIdentificationNumber);
+        if (!['P', 'C'].includes(outgoing.fieldPosition) || action.incomingIdentificationNumber === outgoing.identificationNumber) {
+          throw new BadRequestException('El corredor temporal solo puede reemplazar al lanzador o receptor.');
+        }
+        if (!presentPlayers.includes(action.incomingIdentificationNumber)) throw new BadRequestException('El corredor temporal debe estar presente y confirmado.');
+        if (tournament.courtesyRunnerSource === 'BENCH') reserve(action.incomingIdentificationNumber);
+        break;
+      }
+      case 'staff-arrival':
+        if (presentOfficials.some((official) => official.role === action.official.role && official.identificationNumber === action.official.identificationNumber)) {
+          throw new BadRequestException('Este directivo ya está registrado como presente en ese cargo.');
+        }
+        presentOfficials.push(action.official);
+        break;
+      case 'staff-departure':
+        if (!presentOfficials.some((official) => official.role === action.role && official.identificationNumber === action.identificationNumber)) {
+          throw new BadRequestException('El directivo no está registrado como presente en ese cargo.');
+        }
+        presentOfficials = presentOfficials.filter((official) => official.role !== action.role || official.identificationNumber !== action.identificationNumber);
+        break;
+    }
+    const lineupEntries = this.sanitizeLineupEntries(entries.map((entry) => ({ ...entry, jerseyNumber: entry.jerseyNumber ?? undefined })), [], 'alineación');
+    lineupEntries.forEach((entry) => registered(entry.identificationNumber));
+    return { lineupEntries, presentPlayers, presentOfficials };
+  }
+
+  private personnelText(value: unknown, label: string, allowEmpty = false): string {
+    if (typeof value !== 'string' || (!allowEmpty && !value.trim())) throw new BadRequestException(`${label}: indica un texto válido.`);
+    return value.trim();
+  }
+
+  private sanitizePresentOfficials(value: unknown): PresentOfficial[] {
+    if (!Array.isArray(value)) throw new BadRequestException('Los directivos presentes deben enviarse como una lista.');
+    const officials = value.map((entry: unknown): PresentOfficial => {
+      if (!entry || typeof entry !== 'object' || !('role' in entry) || !('identificationNumber' in entry) || !('displayName' in entry)) {
+        throw new BadRequestException('Indica cargo, cédula y nombre del directivo presente.');
+      }
+      if (entry.role !== 'DIRIGENTE' && entry.role !== 'MANAGER' && entry.role !== 'DELEGADO') {
+        throw new BadRequestException('Solo se incluyen dirigente, manager y delegados; no los coach de primera y tercera.');
+      }
+      return {
+        role: entry.role,
+        identificationNumber: this.normalizeIdentificationNumber(this.personnelText(entry.identificationNumber, 'cédula del directivo'), 'cédula del directivo'),
+        displayName: this.personnelText(entry.displayName, 'nombre del directivo')
+      };
+    });
+    if (new Set(officials.map((entry) => `${entry.role}:${entry.identificationNumber}`)).size !== officials.length) {
+      throw new BadRequestException('No repitas un directivo en el mismo cargo.');
+    }
+    return officials;
+  }
+
+  private sanitizePersonnelAction(value: unknown): PersonnelAction {
+    if (!value || typeof value !== 'object' || !('kind' in value)) throw new BadRequestException('Indica el movimiento de personal.');
+    const text = (key: string) => this.personnelText(key in value ? Reflect.get(value, key) : undefined, key);
+    const id = (key: string) => this.normalizeIdentificationNumber(text(key), 'cédula');
+    switch (value.kind) {
+      case 'arrival': return { kind: 'arrival', identificationNumber: id('identificationNumber') };
+      case 'substitution': return {
+        kind: 'substitution', outgoingIdentificationNumber: id('outgoingIdentificationNumber'),
+        incomingIdentificationNumber: id('incomingIdentificationNumber'),
+        fieldPosition: this.normalizeFieldPosition(text('fieldPosition'), 'posición'),
+        jerseyNumber: this.normalizeJerseyNumber(text('jerseyNumber'), 'camiseta')
+      };
+      case 'defense': return { kind: 'defense', identificationNumber: id('identificationNumber'), fieldPosition: this.normalizeFieldPosition(text('fieldPosition'), 'posición') };
+      case 'courtesy': return {
+        kind: 'courtesy', fromBase: this.requireIntegerRange('fromBase' in value && typeof value.fromBase === 'number' ? value.fromBase : NaN, 'base', 1, 3),
+        outgoingIdentificationNumber: id('outgoingIdentificationNumber'), incomingIdentificationNumber: id('incomingIdentificationNumber')
+      };
+      case 'staff-arrival': return { kind: 'staff-arrival', official: this.sanitizePresentOfficials(['official' in value ? value.official : null])[0] };
+      case 'staff-departure': {
+        const role = text('role');
+        if (role !== 'DIRIGENTE' && role !== 'MANAGER' && role !== 'DELEGADO') throw new BadRequestException('Cargo de directivo inválido.');
+        return { kind: 'staff-departure', identificationNumber: id('identificationNumber'), role };
+      }
+      default: throw new BadRequestException('Movimiento de personal no permitido.');
+    }
+  }
+
+  private assertPersonnelOpen(game: OfficialGameRecord) {
+    if (game.officialState.status === 'final') throw new BadRequestException('No se permite modificar el personal de un juego finalizado.');
+  }
+
+  private publishPersonnel(game: OfficialGameRecord, tournament: TournamentAuthorizationRecord) {
+    game.officialState = {
+      ...game.officialState, officialVersion: game.officialState.officialVersion + 1, updatedAt: this.nowIso()
+    };
+    game.personnelVersion += 1;
+    this.personnelStreams.get(game.gameId)?.next();
+    this.getOrCreateStream(game.gameId).next({
+      kind: 'snapshot', gameId: game.gameId, tournamentId: game.tournamentId,
+      state: game.officialState, authorization: this.serializeGameAuthorization(game, tournament),
+      lineup: this.serializeLineupStatus(game, tournament), playByPlay: this.serializePlayByPlay(game, tournament)
+    });
+  }
+
   getGamePermissions(input: GamePermissionsInput) {
     const gameId = this.requireText(input.gameId, 'gameId');
     const tournamentId = this.requireText(input.tournamentId, 'tournamentId');
@@ -899,7 +1491,7 @@ export class OfficialScoringService {
     const game = this.getOrCreateGame(gameId, tournamentId);
 
     const canOfficialWrite = this.canWriteOfficial(game, tournament, userId, role);
-    const canPrivateWrite = role === 'manager';
+    const canPrivateWrite = false;
     const managerTeams = Array.from(tournament.teamRosters.values())
       .filter((roster) => roster.managerId === userId)
       .map((roster) => roster.teamId);
@@ -913,10 +1505,10 @@ export class OfficialScoringService {
       canOfficialWrite,
       canPrivateWrite,
       canSubmitLineup: role === 'manager' && managerTeams.length > 0,
-      canRegisterPlayers: role === 'manager' || role === 'organizer',
+      canRegisterPlayers: role === 'organizer',
       managerTeamIds: managerTeams,
       subscriptionTier: tournament.subscriptionTier,
-      scoringMode: canOfficialWrite ? 'official' : canPrivateWrite ? 'private' : 'read_only'
+      scoringMode: canOfficialWrite ? 'official' : 'read_only'
     } as const;
   }
 
@@ -927,15 +1519,117 @@ export class OfficialScoringService {
     const actorRole = command.actorRole;
 
     const tournament = this.getTournamentOrThrow(tournamentId);
-    const game = this.getOrCreateGame(gameId, tournamentId);
+    const stored = this.getOrCreateGame(gameId, tournamentId);
+    const game = {
+      ...stored, officialState: structuredClone(stored.officialState),
+      lineups: structuredClone(stored.lineups), playByPlay: structuredClone(stored.playByPlay),
+      events: [...stored.events], scoringHistory: [...stored.scoringHistory]
+    };
 
     if (!this.canWriteOfficial(game, tournament, actorId, actorRole)) {
       throw new ForbiddenException(
         'No autorizado para anotacion oficial. Solo organizador o anotadores autorizados pueden publicar el resultado legal.'
       );
     }
+    if (command.expectedOfficialVersion !== undefined && command.expectedOfficialVersion !== game.officialState.officialVersion) {
+      throw new ConflictException('La pizarra oficial cambió. Recárgala antes de anotar.');
+    }
+    const scorecardOperation = command.scorecardCommand !== undefined || command.undoLast !== undefined ||
+      command.regulationInnings !== undefined || command.lastErrorOuts !== undefined;
+    if (scorecardOperation && command.expectedOfficialVersion === undefined) {
+      throw new BadRequestException('La anotación requiere la versión actual de la pizarra.');
+    }
+    if (scorecardOperation && (command.playEvent || command.plateAppearance || command.runReview ||
+        Object.keys(command.patch ?? {}).length ||
+        [command.scorecardCommand, command.undoLast, command.regulationInnings, command.lastErrorOuts].filter((v) => v !== undefined).length !== 1)) {
+      throw new BadRequestException('Envía una sola operación oficial por vez.');
+    }
+    const before = {
+      state: structuredClone(game.officialState), playByPlay: structuredClone(game.playByPlay),
+      indexes: new Map(Array.from(game.lineups, ([id, lineup]) => [id, lineup.currentBatterIndex]))
+    };
+    const restore = (entry: typeof before) => {
+      game.officialState = { ...structuredClone(entry.state), officialVersion: stored.officialState.officialVersion };
+      game.playByPlay = structuredClone(entry.playByPlay);
+      for (const [id, index] of entry.indexes) {
+        const lineup = game.lineups.get(id);
+        if (lineup) lineup.currentBatterIndex = index;
+      }
+    };
+    let scorecardCommand: PrivateCommand | undefined;
+    if (command.undoLast !== undefined) {
+      if (command.undoLast !== true) throw new BadRequestException('Indica deshacer la última anotación.');
+      const previous = game.scoringHistory.pop();
+      if (!previous) throw new BadRequestException('No hay una anotación que se pueda deshacer. Los movimientos de personal se corrigen por separado.');
+      restore(previous);
+    }
+    if (command.lastErrorOuts !== undefined) {
+      const previous = game.scoringHistory.pop();
+      if (previous?.command?.kind !== 'play' || previous.command.result !== 'error') {
+        throw new ConflictException('La última anotación ya no es el error seleccionado.');
+      }
+      if (command.lastErrorOuts !== null && (!Number.isInteger(command.lastErrorOuts) || command.lastErrorOuts < 0 || command.lastErrorOuts > 3)) {
+        throw new BadRequestException('Indica entre cero y tres outs evitados por el error.');
+      }
+      restore(previous);
+      scorecardCommand = { ...previous.command };
+      if (command.lastErrorOuts === null) delete scorecardCommand.errorOuts;
+      else scorecardCommand.errorOuts = command.lastErrorOuts;
+    }
+    if (command.regulationInnings !== undefined) {
+      if (![7, 9].includes(command.regulationInnings) || game.officialState.status === 'final') {
+        throw new BadRequestException('Define siete o nueve entradas antes de cerrar el partido.');
+      }
+      game.regulationInnings = command.regulationInnings;
+    }
+    if (command.scorecardCommand !== undefined) {
+      if (!isScorecardCommand(command.scorecardCommand) || command.scorecardCommand.sharedRequestId ||
+          !['pitch', 'play', 'runner', 'misplay', 'courtesy', 'finish', 'run-review'].includes(command.scorecardCommand.kind)) {
+        throw new BadRequestException('La jugada oficial contiene datos inválidos.');
+      }
+      scorecardCommand = command.scorecardCommand;
+    }
+    if ((scorecardCommand || command.playEvent || command.plateAppearance) && game.officialState.status === 'final') {
+      throw new ConflictException('El partido está cerrado. Deshaz el cierre antes de continuar.');
+    }
+    let preview: PrivateState | undefined;
+    if (scorecardCommand) {
+      const current = this.serializeScorecard(game, tournament);
+      if (!current.lineups.home.length || !current.lineups.away.length) {
+        throw new BadRequestException('Ambos managers deben entregar su lineup antes de anotar el partido.');
+      }
+      if (scorecardCommand.kind === 'play' && scorecardCommand.destinations === undefined) {
+        scorecardCommand = { ...scorecardCommand, destinations: minimumDestinations(current, scorecardCommand.result) };
+      }
+      if (scorecardCommand.kind === 'courtesy') {
+        const teamId = game.officialState.offenseTeamId;
+        if (!teamId || !game.teamSheets.get(teamId)?.presentPlayers.includes(scorecardCommand.playerId)) {
+          throw new BadRequestException('El corredor temporal debe estar presente y confirmado.');
+        }
+        scorecardCommand = { ...scorecardCommand, sourceRule: tournament.courtesyRunnerSource };
+      }
+      try { preview = applyPrivateCommand(current, scorecardCommand); }
+      catch (error) {
+        if (!(error instanceof Error)) throw error;
+        throw new BadRequestException(error.message);
+      }
+      if (scorecardCommand.kind === 'run-review') command = { ...command, runReview: scorecardCommand.review };
+    }
+    if (command.runReview !== undefined) {
+      if (!validRunReview(command.runReview) || command.playEvent || command.plateAppearance) {
+        throw new BadRequestException('La revisión de carrera debe enviarse por separado y con su justificación.');
+      }
+      if (!game.playByPlay.runAccounting.runs.some((run) => run.eventId === command.runReview?.eventId && run.runnerId === command.runReview.runnerId)) {
+        throw new BadRequestException('No se encontró la carrera que deseas revisar.');
+      }
+      game.playByPlay.runAccounting = reviewAccountedRun(game.playByPlay.runAccounting, command.runReview);
+    }
 
-    let patch: OfficialScoringPatch = { ...(command.patch ?? {}) };
+    let patch: OfficialScoringPatch = {
+      ...(command.patch ?? {}),
+      ...(scorecardCommand?.kind === 'finish' ? { status: 'final' as const, lastPlay: 'Partido finalizado oficialmente' } : {}),
+      ...(command.undoLast ? { lastPlay: 'Última anotación oficial deshecha' } : {})
+    };
     let plateAppearanceResult: {
       teamId: string;
       batterIdentificationNumber: string;
@@ -962,8 +1656,9 @@ export class OfficialScoringService {
       };
     }
 
-    if (command.playEvent) {
-      playEventResult = this.applyPlayEvent(game, command.playEvent);
+    const playEvent = scorecardCommand && preview ? this.scorecardPlayEvent(scorecardCommand, this.serializeScorecard(game, tournament)) : command.playEvent;
+    if (playEvent) {
+      playEventResult = this.applyPlayEvent(game, playEvent, preview);
       patch = {
         ...patch,
         status: patch.status ?? 'in_progress',
@@ -988,6 +1683,13 @@ export class OfficialScoringService {
 
     const nextState = this.applyPatch(game, game.officialState, patch, actorId, actorRole);
     game.officialState = nextState;
+    if (scorecardCommand || command.playEvent || command.plateAppearance || command.runReview || !scorecardOperation) {
+      game.scoringHistory.push({ ...before, command: scorecardCommand });
+      if (command.lastErrorOuts !== undefined) {
+        const replaced = stored.scoringHistory.at(-1);
+        if (replaced) game.scoringHistory[game.scoringHistory.length - 1] = { ...replaced, command: scorecardCommand };
+      }
+    }
 
     const event: OfficialScoringUpdateEvent = {
       kind: 'official_update',
@@ -1000,12 +1702,18 @@ export class OfficialScoringService {
       state: nextState,
       plateAppearance: plateAppearanceResult,
       playEvent: playEventResult,
+      runReview: command.runReview,
+      scorecardCommand,
+      undoLast: command.undoLast,
+      regulationInnings: command.regulationInnings,
+      lastErrorOuts: command.lastErrorOuts,
       lineup: this.serializeLineupStatus(game, tournament),
       playByPlay: this.serializePlayByPlay(game, tournament),
       timestamp: this.nowIso()
     };
 
     game.events.push(event);
+    Object.assign(stored, game);
     this.getOrCreateStream(gameId).next(event);
 
     return {
@@ -1100,6 +1808,21 @@ export class OfficialScoringService {
     return game.gameAuthorizedScorekeepers.has(actorId);
   }
 
+  private recordPlateAppearance(
+    game: OfficialGameRecord,
+    plateAppearance: Omit<CompletedPlateAppearanceRecord, 'sequence'>
+  ) {
+    game.playByPlay.plateAppearanceSequence += 1;
+    game.playByPlay.plateAppearances.push({
+      sequence: game.playByPlay.plateAppearanceSequence,
+      ...plateAppearance
+    });
+
+    if (game.playByPlay.plateAppearances.length > 500) {
+      game.playByPlay.plateAppearances = game.playByPlay.plateAppearances.slice(-500);
+    }
+  }
+
   private applyPlateAppearance(game: OfficialGameRecord, plateAppearance: PlateAppearanceInput) {
     if (!game.teams) {
       throw new BadRequestException('Debes definir los equipos del juego antes de registrar turnos al bate.');
@@ -1142,6 +1865,15 @@ export class OfficialScoringService {
 
     const result = this.requireText(plateAppearance.result, 'result');
 
+    this.recordPlateAppearance(game, {
+      inning: game.officialState.inning,
+      offenseTeamId: teamId,
+      batterIdentificationNumber: expectedBatterIdentification,
+      result,
+      description: result,
+      runsScored: 0
+    });
+
     lineup.currentBatterIndex = (lineup.currentBatterIndex + 1) % lineup.playerIdentificationNumbers.length;
     lineup.updatedAt = this.nowIso();
 
@@ -1157,19 +1889,55 @@ export class OfficialScoringService {
     };
   }
 
-  private applyPlayEvent(game: OfficialGameRecord, input: PlayEventInput): OfficialPlayEventRecord {
+  private scorecardPlayEvent(command: PrivateCommand, state: PrivateState): PlayEventInput | undefined {
+    const plays: Record<PlayResult, PlayEventType> = {
+      single: 'HIT_SINGLE', double: 'HIT_DOUBLE', triple: 'HIT_TRIPLE', homeRun: 'HOME_RUN',
+      walk: 'WALK', hitByPitch: 'HIT_BY_PITCH', strikeout: 'STRIKEOUT', groundOut: 'GROUND_OUT',
+      flyOut: 'FLY_OUT', lineOut: 'LINE_OUT', battedOut: 'OUT', ruleOut: 'FORCE_OUT',
+      sacrificeFly: 'SACRIFICE_FLY', sacrificeBunt: 'BUNT', error: 'ERROR',
+      fieldersChoice: 'FORCE_OUT', doublePlay: 'DOUBLE_PLAY', triplePlay: 'TRIPLE_PLAY'
+    };
+    if (command.kind === 'pitch') return { type: command.value === 'ball' ? 'BALL' : command.value === 'strike' ? 'STRIKE' : 'FOUL' };
+    if (command.kind === 'play') return { type: plays[command.result], errorOuts: command.errorOuts, note: command.note };
+    if (command.kind === 'misplay') return { type: 'DROPPED_FOUL', errorOuts: 1 };
+    if (command.kind === 'courtesy') return { type: 'COURTESY_RUNNER', fromBase: command.from, runnerIdentificationNumber: command.playerId };
+    if (command.kind === 'runner') {
+      const actions: Record<typeof command.action, PlayEventType> = {
+        steal: 'STEAL_BASE', caught: 'CAUGHT_STEALING', pickoff: 'PICKOFF', wild: 'WILD_PITCH',
+        passed: 'PASSED_BALL', balk: 'BALK', advance: 'RUNNER_ADVANCE', error: 'ERROR_ADVANCE',
+        run: 'RUN_SCORED', ruleOut: 'RUNNER_OUT', advanceOut: 'RUNNER_OUT'
+      };
+      return { type: actions[command.action], fromBase: command.from,
+        runnerIdentificationNumber: state.bases[command.from - 1] ?? undefined,
+        ...(command.to ? { toBase: command.to } : {}), errorOuts: command.errorOuts, note: command.note };
+    }
+    return undefined;
+  }
+
+  private applyPlayEvent(game: OfficialGameRecord, input: PlayEventInput, preview?: PrivateState): OfficialPlayEventRecord {
     if (!game.teams) {
       throw new BadRequestException('Debes definir los equipos del juego antes de registrar jugada a jugada.');
     }
 
     const type = this.requirePlayEventType(input.type);
+    if (!validRunEvidence(input) || input.errorOuts !== undefined && !['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(type)) {
+      throw new BadRequestException('Los outs evitados deben ser de cero a tres y corresponden solo a errores defensivos.');
+    }
+    if (type === 'DROPPED_FOUL' && input.errorOuts !== undefined && input.errorOuts !== 1) {
+      throw new BadRequestException('Un error en foul que prolonga el turno evita un out.');
+    }
+    if (type === 'ERROR_ADVANCE' && input.errorOuts !== undefined && input.errorOuts > 1) {
+      throw new BadRequestException('El error sobre un corredor solo puede evitar cero o un out.');
+    }
+    if (input.errorOuts !== undefined && game.officialState.outs + input.errorOuts > 3) {
+      throw new BadRequestException('Los outs evitados no pueden superar los outs que faltaban en la entrada.');
+    }
     const requestedOffenseTeamId = this.normalizeOptionalText(input.teamId);
     const offenseTeamId = requestedOffenseTeamId ?? game.officialState.offenseTeamId ?? game.teams.awayTeamId;
 
     if (offenseTeamId !== game.teams.homeTeamId && offenseTeamId !== game.teams.awayTeamId) {
       throw new BadRequestException(`teamId ${offenseTeamId} no pertenece a este juego.`);
     }
-
     const defenseTeamId =
       offenseTeamId === game.teams.homeTeamId ? game.teams.awayTeamId : game.teams.homeTeamId;
 
@@ -1199,7 +1967,8 @@ export class OfficialScoringService {
       'DOUBLE_PLAY',
       'TRIPLE_PLAY',
       'BUNT',
-      'ERROR'
+      'ERROR',
+      'DROPPED_FOUL'
     ].includes(type);
 
     if (requiresBatter && !expectedBatter) {
@@ -1216,9 +1985,14 @@ export class OfficialScoringService {
       ? this.normalizeIdentificationNumber(input.runnerIdentificationNumber, 'playEvent.runnerIdentificationNumber')
       : null;
 
-    const pitcherFromInput = input.pitcherIdentificationNumber
+    const activePitcher = game.lineups.get(defenseTeamId)?.lineupEntries.find((entry) => entry.fieldPosition === 'P')?.identificationNumber ?? null;
+    const suppliedPitcher = input.pitcherIdentificationNumber
       ? this.normalizeIdentificationNumber(input.pitcherIdentificationNumber, 'playEvent.pitcherIdentificationNumber')
       : null;
+    if (suppliedPitcher && suppliedPitcher !== activePitcher) {
+      throw new BadRequestException('El lanzador debe coincidir con la posición P de la alineación defensiva vigente. Registra primero el cambio.');
+    }
+    const pitcherFromInput = activePitcher;
 
     const fielderFromInput = input.fielderIdentificationNumber
       ? this.normalizeIdentificationNumber(input.fielderIdentificationNumber, 'playEvent.fielderIdentificationNumber')
@@ -1530,6 +2304,57 @@ export class OfficialScoringService {
       } else if (type === 'LINE_OUT') {
         description = `${batterIdentification} out por linea.`;
       }
+    } else if (type === 'COURTESY_RUNNER') {
+      if (!runnerFromInput) {
+        throw new BadRequestException('playEvent.runnerIdentificationNumber es requerido para COURTESY_RUNNER.');
+      }
+      if (!fromBase) {
+        throw new BadRequestException('playEvent.fromBase es requerido para COURTESY_RUNNER.');
+      }
+
+      const currentRunner =
+        fromBase === 1 ? basesAfter.first : fromBase === 2 ? basesAfter.second : basesAfter.third;
+      if (!currentRunner) {
+        throw new BadRequestException(`No hay un corredor en la base ${fromBase}.`);
+      }
+
+      const replacedPlayer = lineup?.lineupEntries.find(
+        (entry) => entry.identificationNumber === (game.playByPlay.courtesyFor[currentRunner] ?? currentRunner)
+      );
+      if (!replacedPlayer || !['P', 'C'].includes(replacedPlayer.fieldPosition)) {
+        throw new BadRequestException('El corredor temporal solo puede reemplazar al pitcher o al receptor.');
+      }
+
+      if (
+        [basesAfter.first, basesAfter.second, basesAfter.third].includes(runnerFromInput) ||
+        runnerFromInput === currentRunner
+      ) {
+        throw new BadRequestException('El corredor temporal ya esta en base o es el jugador reemplazado.');
+      }
+
+      const tournament = this.getTournamentOrThrow(game.tournamentId);
+      const teamRoster = this.getTeamRosterOrThrow(tournament, offenseTeamId);
+      if (!teamRoster.playerIdentificationNumbers.has(runnerFromInput)) {
+        throw new BadRequestException('El corredor temporal debe pertenecer al roster del equipo ofensivo.');
+      }
+      if (!this.globalPlayersByIdentification.has(runnerFromInput)) {
+        throw new BadRequestException(`La cedula ${runnerFromInput} no existe en el registro global.`);
+      }
+      if (
+        tournament.courtesyRunnerSource !== 'ROSTER' &&
+        lineup?.lineupEntries.some((entry) => entry.identificationNumber === runnerFromInput)
+      ) {
+        throw new BadRequestException('La regla de este juego solo permite corredor temporal fuera del lineup.');
+      }
+
+      if (fromBase === 1) {
+        basesAfter.first = runnerFromInput;
+      } else if (fromBase === 2) {
+        basesAfter.second = runnerFromInput;
+      } else {
+        basesAfter.third = runnerFromInput;
+      }
+      description = `${runnerFromInput} entra como corredor temporal por ${currentRunner} en base ${fromBase}.`;
     } else if (type === 'STEAL_BASE') {
       if (!runnerFromInput) {
         throw new BadRequestException('playEvent.runnerIdentificationNumber es requerido para STEAL_BASE.');
@@ -1570,7 +2395,7 @@ export class OfficialScoringService {
 
       const runnerStats = this.getOrCreateBatterStats(game, runnerFromInput);
       runnerStats.caughtStealing += 1;
-    } else if (type === 'PICKOFF') {
+    } else if (type === 'PICKOFF' || type === 'RUNNER_OUT') {
       if (!runnerFromInput) {
         throw new BadRequestException('playEvent.runnerIdentificationNumber es requerido para PICKOFF.');
       }
@@ -1585,10 +2410,10 @@ export class OfficialScoringService {
         input.outsRecorded !== undefined
           ? this.requireIntegerRange(input.outsRecorded, 'playEvent.outsRecorded', 1, 2)
           : 1;
-      description = `${runnerFromInput} es puesto out por pickoff.`;
+      description = type === 'RUNNER_OUT' ? `${runnerFromInput} queda out en las bases.` : `${runnerFromInput} es puesto out por pickoff.`;
 
       const runnerStats = this.getOrCreateBatterStats(game, runnerFromInput);
-      runnerStats.caughtStealing += 1;
+      if (type === 'PICKOFF') runnerStats.caughtStealing += 1;
     } else if (type === 'BALK') {
       const balkResult = this.advanceAllRunnersOneBase(basesAfter);
       basesAfter = balkResult.nextBases;
@@ -1600,7 +2425,13 @@ export class OfficialScoringService {
         const pitcherStats = this.getOrCreatePitcherStats(game, pitcherFromInput);
         pitcherStats.pitches += 1;
       }
-    } else if (type === 'WILD_PITCH' || type === 'PASSED_BALL') {
+    } else if (type === 'DROPPED_FOUL') {
+      description = `Error en foul que prolonga el turno de ${batterIdentification}.`;
+      if (fielderFromInput) this.getOrCreateFieldingStats(game, fielderFromInput).errors += 1;
+    } else if (['WILD_PITCH', 'PASSED_BALL', 'ERROR_ADVANCE', 'RUNNER_ADVANCE'].includes(type)) {
+      if (['ERROR_ADVANCE', 'RUNNER_ADVANCE'].includes(type) && !runnerFromInput) {
+        throw new BadRequestException('Identifica al corredor para registrar la causa de su avance.');
+      }
       if (runnerFromInput) {
         const currentBase = fromBase ?? this.findRunnerBase(basesAfter, runnerFromInput);
         if (!currentBase) {
@@ -1614,10 +2445,10 @@ export class OfficialScoringService {
         scoredRunnerIds = advanceResult.scoredRunnerIds;
       }
 
-      description =
-        type === 'WILD_PITCH'
-          ? 'Lanzamiento descontrolado con avance de corredores.'
-          : 'Passed ball con avance de corredores.';
+      description = type === 'WILD_PITCH' ? 'Lanzamiento descontrolado con avance de corredores.' :
+        type === 'PASSED_BALL' ? 'Bola pasada con avance de corredores.' :
+        type === 'ERROR_ADVANCE' ? 'Avance por error defensivo.' : 'Avance de corredor sin error.';
+      if (type === 'ERROR_ADVANCE' && fielderFromInput) this.getOrCreateFieldingStats(game, fielderFromInput).errors += 1;
     } else if (type === 'RUN_SCORED') {
       if (runnerFromInput) {
         const currentBase = fromBase ?? this.findRunnerBase(basesAfter, runnerFromInput);
@@ -1643,6 +2474,19 @@ export class OfficialScoringService {
       throw new BadRequestException(`Tipo de jugada no soportado: ${type}.`);
     }
 
+    const previewLog = preview?.log.at(-1);
+    if (preview && previewLog) {
+      basesAfter = { first: preview.bases[0], second: preview.bases[1], third: preview.bases[2] };
+      scoredRunnerIds = previewLog.runs;
+      runsScored = previewLog.runs.length;
+      outsRecorded = previewLog.outs;
+      description = previewLog.text;
+      if (type === 'BUNT') applyAtBatToBatter = false;
+      awardRbiToBatter = previewLog.rbis > 0;
+    }
+    if (runsScored < scoredRunnerIds.length) {
+      throw new BadRequestException('Las carreras indicadas no pueden ser menores que los corredores que anotaron en la jugada.');
+    }
     if (runsScored > 0) {
       addRunsToScoreboard(offenseTeamId, runsScored);
       registerRunnerScored(scoredRunnerIds);
@@ -1661,7 +2505,7 @@ export class OfficialScoringService {
       }
 
       if (applyHitByPitchToBatter) {
-        batterStats.walks += 1;
+        batterStats.hitByPitch += 1;
       }
 
       if (applyStrikeoutToBatter) {
@@ -1720,9 +2564,6 @@ export class OfficialScoringService {
         pitcherStats.outsRecorded += outsRecorded;
       }
 
-      if (runsScored > 0) {
-        pitcherStats.runsAllowed += runsScored;
-      }
     }
 
     if (fielderFromInput && outsRecorded > 0) {
@@ -1730,11 +2571,43 @@ export class OfficialScoringService {
       fieldingStats.outsRecorded += outsRecorded;
     }
 
+    const accountedBasesAfter = [basesAfter.first, basesAfter.second, basesAfter.third];
+    const nextAccounting = accountRuns(game.playByPlay.runAccounting, {
+      eventId: game.playByPlay.sequence + 1,
+      half: `${game.officialState.inning}:${offenseTeamId}`, offenseId: offenseTeamId,
+      pitcherId: pitcherFromInput, outsBefore: game.officialState.outs,
+      batterId: batterIdentification, plateCompleted, reachedOnError: type === 'ERROR',
+      basesBefore: [basesBefore.first, basesBefore.second, basesBefore.third],
+      basesAfter: accountedBasesAfter, scored: scoredRunnerIds, totalRuns: runsScored,
+      misplay: ['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(type) ? 'error' : type === 'PASSED_BALL' ? 'passedBall' : undefined,
+      errorOuts: type === 'DROPPED_FOUL' ? 1 : input.errorOuts,
+      unknownAdvance: type === 'RUN_SCORED',
+      homeRun: type === 'HOME_RUN',
+      uncertainPlay: ['DOUBLE_PLAY', 'TRIPLE_PLAY', 'FORCE_OUT'].includes(type),
+      prolongedBatter: type === 'DROPPED_FOUL',
+      ballsBefore: game.officialState.balls, strikesBefore: game.officialState.strikes, walk: applyWalkToBatter,
+      eliminated: outsRecorded ? [...[basesBefore.first, basesBefore.second, basesBefore.third], ...(plateCompleted ? [batterIdentification] : [])]
+        .filter((id): id is string => id !== null && !accountedBasesAfter.includes(id) && !scoredRunnerIds.includes(id)) : [],
+      replacement: type === 'COURTESY_RUNNER' && fromBase && runnerFromInput && [basesBefore.first, basesBefore.second, basesBefore.third][fromBase - 1] ?
+        { outgoing: [basesBefore.first, basesBefore.second, basesBefore.third][fromBase - 1]!, incoming: runnerFromInput } : undefined
+    });
+    for (const run of nextAccounting.runs.filter((entry) => entry.eventId === game.playByPlay.sequence + 1)) {
+      if (run.pitcherId) this.getOrCreatePitcherStats(game, run.pitcherId).runsAllowed += run.count;
+    }
+    game.playByPlay.runAccounting = nextAccounting;
+    if (applyWalkToBatter && batterIdentification) {
+      const owner = nextAccounting.runners[batterIdentification]?.pitcherId ?? null;
+      if (owner !== pitcherFromInput) {
+        if (pitcherFromInput) this.getOrCreatePitcherStats(game, pitcherFromInput).walksAllowed -= 1;
+        if (owner) this.getOrCreatePitcherStats(game, owner).walksAllowed += 1;
+      }
+    }
+
     if (outsRecorded > 0) {
       const totalOuts = outsAfter + outsRecorded;
       if (totalOuts >= 3) {
         outsAfter = 0;
-        inningAfter += 1;
+        if (offenseTeamId === game.teams?.homeTeamId) inningAfter += 1;
         ballsAfter = 0;
         strikesAfter = 0;
         basesAfter = { first: null, second: null, third: null };
@@ -1748,6 +2621,14 @@ export class OfficialScoringService {
       lineup.currentBatterIndex = (lineup.currentBatterIndex + 1) % lineup.playerIdentificationNumbers.length;
       lineup.updatedAt = this.nowIso();
     }
+    if (preview) {
+      inningAfter = preview.inning;
+      outsAfter = preview.outs;
+      ballsAfter = preview.balls;
+      strikesAfter = preview.strikes;
+      offenseTeamAfter = preview.side === 'home' ? game.teams!.homeTeamId : game.teams!.awayTeamId;
+      game.playByPlay.courtesyFor = preview.courtesyFor;
+    }
 
     const note = this.normalizeOptionalText(input.note);
 
@@ -1756,7 +2637,9 @@ export class OfficialScoringService {
 
     const eventRecord: OfficialPlayEventRecord = {
       sequence: game.playByPlay.sequence,
+      inning: game.officialState.inning,
       type,
+      battingTeamId: offenseTeamId,
       offenseTeamId: offenseTeamAfter,
       defenseTeamId,
       batterIdentificationNumber: batterIdentification ?? null,
@@ -1775,10 +2658,38 @@ export class OfficialScoringService {
       awayScoreAfter,
       description,
       note,
-      timestamp: this.nowIso()
+      timestamp: this.nowIso(),
+      errorOuts: type === 'DROPPED_FOUL' ? 1 : input.errorOuts ?? null,
+      scoredRunnerIds
     };
 
     game.playByPlay.events.push(eventRecord);
+    const resultByType: Partial<Record<PlayEventType, PlayResult>> = {
+      HIT_SINGLE: 'single', HIT_DOUBLE: 'double', HIT_TRIPLE: 'triple', HOME_RUN: 'homeRun', WALK: 'walk',
+      HIT_BY_PITCH: 'hitByPitch', STRIKEOUT: 'strikeout', OUT: 'battedOut', GROUND_OUT: 'groundOut',
+      FLY_OUT: 'flyOut', LINE_OUT: 'lineOut', SACRIFICE_FLY: 'sacrificeFly', DOUBLE_PLAY: 'doublePlay',
+      TRIPLE_PLAY: 'triplePlay', FORCE_OUT: 'ruleOut', BUNT: 'sacrificeBunt', ERROR: 'error'
+    };
+    game.playByPlay.scorecardLog.push(previewLog ?? {
+      inning: eventRecord.inning, side: offenseTeamId === game.teams?.homeTeamId ? 'home' : 'away',
+      batterId: batterIdentification, runnerId: runnerFromInput,
+      result: plateCompleted ? type === 'BALL' ? 'walk' : type === 'STRIKE' ? 'strikeout' : resultByType[type] ?? null : null,
+      pitch: type === 'BALL' ? 'ball' : type === 'STRIKE' ? 'strike' : type === 'FOUL' ? 'foul' : null,
+      text: description, runs: scoredRunnerIds, outs: outsRecorded,
+      stolenBy: type === 'STEAL_BASE' ? runnerFromInput : null,
+      rbis: awardRbiToBatter ? runsScored : 0, pitcherId: pitcherFromInput
+    });
+    if (plateCompleted && batterIdentification) {
+      this.recordPlateAppearance(game, {
+        inning: eventRecord.inning,
+        offenseTeamId: eventRecord.battingTeamId,
+        batterIdentificationNumber: batterIdentification,
+        result: type,
+        description,
+        runsScored
+      });
+    }
+
     if (game.playByPlay.events.length > 500) {
       game.playByPlay.events = game.playByPlay.events.slice(-500);
     }
@@ -1886,12 +2797,17 @@ export class OfficialScoringService {
     }
 
     const newGame: OfficialGameRecord = {
+      scoringHistory: [],
       gameId,
       tournamentId,
       hasGameScopedAuthorization: false,
       gameAuthorizedScorekeepers: new Set<string>(),
       teams: null,
       lineups: new Map<string, GameLineupRecord>(),
+      fieldRepresentatives: new Map<string, FieldRepresentativeRecord>(),
+      teamSheets: new Map(),
+      personnelRequests: [],
+      personnelVersion: 0,
       officialState: {
         inning: 1,
         outs: 0,
@@ -1909,7 +2825,11 @@ export class OfficialScoringService {
         updatedBy: null
       },
       playByPlay: {
+        scorecardLog: [],
+        courtesyFor: {},
         sequence: 0,
+        plateAppearanceSequence: 0,
+        plateAppearances: [],
         baseRunners: {
           first: null,
           second: null,
@@ -1918,7 +2838,8 @@ export class OfficialScoringService {
         batterStatsByIdentification: new Map<string, BatterStatsRecord>(),
         pitcherStatsByIdentification: new Map<string, PitcherStatsRecord>(),
         fieldingStatsByIdentification: new Map<string, FieldingStatsRecord>(),
-        events: []
+        events: [],
+        runAccounting: createRunAccounting()
       },
       events: []
     };
@@ -1932,6 +2853,7 @@ export class OfficialScoringService {
       tournamentId: record.tournamentId,
       organizerId: record.organizerId,
       subscriptionTier: record.subscriptionTier,
+      courtesyRunnerSource: record.courtesyRunnerSource,
       authorizedScorekeeperIds: Array.from(record.authorizedScorekeepers.values()),
       registeredPlayers: this.globalPlayersByIdentification.size,
       playerRegistryScope: 'global',
@@ -1967,7 +2889,8 @@ export class OfficialScoringService {
       const nextIndex = (lineup.currentBatterIndex + 1) % lineup.playerIdentificationNumbers.length;
       const nextBatterIdentificationNumber = lineup.playerIdentificationNumbers[nextIndex] ?? null;
 
-      const lineupPlayers = lineup.playerIdentificationNumbers
+      const lineupPlayers = lineup.lineupEntries
+        .map((entry) => entry.identificationNumber)
         .map((id) => this.globalPlayersByIdentification.get(id))
         .filter((player): player is RegisteredPlayerRecord => Boolean(player))
         .map((player) => this.projectPlayer(player, visibility));
@@ -1978,7 +2901,9 @@ export class OfficialScoringService {
           : lineup.playerIdentificationNumbers.map((identificationNumber, index) => ({
               identificationNumber,
               battingOrder: index + 1,
-              fieldPosition: 'NA'
+              fieldPosition: 'NA',
+              lineupRole: 'PLAYER' as const,
+              jerseyNumber: null
             }));
 
       const lineupEntries = safeLineupEntries.map((entry) => {
@@ -1989,6 +2914,8 @@ export class OfficialScoringService {
           playerId: entry.identificationNumber,
           battingOrder: entry.battingOrder,
           fieldPosition: entry.fieldPosition,
+          lineupRole: entry.lineupRole ?? 'PLAYER',
+          jerseyNumber: entry.jerseyNumber,
           player: player ? this.projectPlayer(player, visibility) : null
         };
       });
@@ -2000,6 +2927,7 @@ export class OfficialScoringService {
         lineupPlayerIds: lineup.playerIdentificationNumbers,
         lineupEntries,
         lineupPlayers,
+        courtesyRunnerSource: tournament.courtesyRunnerSource,
         currentBatterIndex: lineup.currentBatterIndex,
         currentBatterIdentificationNumber,
         currentBatterId: currentBatterIdentificationNumber,
@@ -2012,7 +2940,49 @@ export class OfficialScoringService {
     return {
       teams: game.teams,
       visibility,
+      fieldRepresentatives: Array.from(game.fieldRepresentatives.keys()).flatMap((teamId) => {
+        const representative = this.serializeFieldRepresentative(game, teamId);
+        return representative ? [{ ...representative, teamId }] : [];
+      }),
       lineups: lineupRows
+    };
+  }
+
+  private serializeScorecard(game: OfficialGameRecord, tournament: TournamentAuthorizationRecord): PrivateState {
+    const home = game.teams?.homeTeamId, away = game.teams?.awayTeamId;
+    const players = (teamId: string | undefined, initial = false): PrivatePlayer[] => {
+      if (!teamId) return [];
+      const entries = initial ? game.teamSheets.get(teamId)?.initialLineup : game.lineups.get(teamId)?.lineupEntries;
+      return (entries ?? []).map((entry) => ({
+        id: entry.identificationNumber,
+        name: this.globalPlayersByIdentification.get(entry.identificationNumber)?.displayName ?? entry.identificationNumber,
+        order: entry.battingOrder, position: entry.fieldPosition, jersey: entry.jerseyNumber ?? ''
+      }));
+    };
+    const roster = (teamId: string | undefined): PrivatePlayer[] => {
+      if (!teamId) return [];
+      const known = [...players(teamId, true), ...players(teamId)];
+      return Array.from(tournament.teamRosters.get(teamId)?.playerIdentificationNumbers ?? []).map((id) =>
+        known.find((player) => player.id === id) ?? {
+          id, name: this.globalPlayersByIdentification.get(id)?.displayName ?? id, order: null, position: 'NA', jersey: ''
+        });
+    };
+    return {
+      seed: {
+        names: { home: home ?? 'Local', away: away ?? 'Visitante' },
+        lineups: { home: players(home, true), away: players(away, true) },
+        rosters: { home: roster(home), away: roster(away) },
+        courtesyRunnerSource: tournament.courtesyRunnerSource,
+        regulationInnings: game.regulationInnings
+      },
+      lineups: { home: players(home), away: players(away) },
+      inning: game.officialState.inning, side: game.officialState.offenseTeamId === home ? 'home' : 'away',
+      balls: game.officialState.balls, strikes: game.officialState.strikes, outs: game.officialState.outs,
+      scores: { home: game.officialState.homeScore, away: game.officialState.awayScore },
+      indexes: { home: home ? game.lineups.get(home)?.currentBatterIndex ?? 0 : 0, away: away ? game.lineups.get(away)?.currentBatterIndex ?? 0 : 0 },
+      bases: [game.playByPlay.baseRunners.first, game.playByPlay.baseRunners.second, game.playByPlay.baseRunners.third],
+      courtesyFor: structuredClone(game.playByPlay.courtesyFor), log: structuredClone(game.playByPlay.scorecardLog),
+      finished: game.officialState.status === 'final', runAccounting: structuredClone(game.playByPlay.runAccounting)
     };
   }
 
@@ -2038,12 +3008,16 @@ export class OfficialScoringService {
       .sort(([left], [right]) => left.localeCompare(right, 'es'))
       .map(([identificationNumber, stats]) => {
         const player = this.globalPlayersByIdentification.get(identificationNumber) ?? null;
+        const runs = runTotals(game.playByPlay.runAccounting.runs.filter((run) => run.pitcherId === identificationNumber), 'pitcher');
 
         return {
           identificationNumber,
           playerId: identificationNumber,
           player: player ? this.projectPlayer(player, visibility) : null,
-          ...stats
+          ...stats,
+          earnedRuns: runs.earned,
+          unearnedRuns: runs.unearned,
+          pendingRuns: runs.pending
         };
       });
 
@@ -2061,6 +3035,15 @@ export class OfficialScoringService {
       });
 
     return {
+      scorecard: this.serializeScorecard(game, tournament),
+      canUndo: game.scoringHistory.length > 0,
+      lastScorecardCommand: game.scoringHistory.at(-1)?.command ?? null,
+      runAccounting: {
+        runs: structuredClone(game.playByPlay.runAccounting.runs),
+        totals: runTotals(game.playByPlay.runAccounting.runs, 'team'),
+        scoreMatches: runTotals(game.playByPlay.runAccounting.runs.filter((run) => run.offenseId === game.teams?.homeTeamId), 'team').total === game.officialState.homeScore &&
+          runTotals(game.playByPlay.runAccounting.runs.filter((run) => run.offenseId === game.teams?.awayTeamId), 'team').total === game.officialState.awayScore
+      },
       baseRunners: {
         first: game.playByPlay.baseRunners.first,
         second: game.playByPlay.baseRunners.second,
@@ -2068,6 +3051,21 @@ export class OfficialScoringService {
       },
       totalEvents: game.playByPlay.events.length,
       recentEvents: game.playByPlay.events.slice(-120),
+      plateAppearances: game.playByPlay.plateAppearances.map((plateAppearance) => ({
+        ...plateAppearance
+      })),
+      fieldingErrors: game.playByPlay.events
+        .filter(
+          (event): event is OfficialPlayEventRecord & { fielderIdentificationNumber: string } =>
+            ['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(event.type) && Boolean(event.fielderIdentificationNumber)
+        )
+        .map((event) => ({
+          sequence: event.sequence,
+          inning: event.inning,
+          defenseTeamId: event.defenseTeamId,
+          fielderIdentificationNumber: event.fielderIdentificationNumber,
+          description: event.description
+        })),
       batterStats,
       pitcherStats,
       fieldingStats
@@ -2145,13 +3143,20 @@ export class OfficialScoringService {
       PASSED_BALL: 'PASSED_BALL',
       CARRERA: 'RUN_SCORED',
       RUN_SCORED: 'RUN_SCORED',
+      CORREDOR_TEMPORAL: 'COURTESY_RUNNER',
+      CORREDOR_DE_CORTESIA: 'COURTESY_RUNNER',
+      COURTESY_RUNNER: 'COURTESY_RUNNER',
       ERROR: 'ERROR',
+      ERROR_ADVANCE: 'ERROR_ADVANCE',
+      RUNNER_ADVANCE: 'RUNNER_ADVANCE',
+      DROPPED_FOUL: 'DROPPED_FOUL',
       DOBLE_PLAY: 'DOUBLE_PLAY',
       DOUBLE_PLAY: 'DOUBLE_PLAY',
       TRIPLE_PLAY: 'TRIPLE_PLAY',
       FORCE_OUT: 'FORCE_OUT',
       OUT_FORZADO: 'FORCE_OUT',
       PICKOFF: 'PICKOFF',
+      RUNNER_OUT: 'RUNNER_OUT',
       PIKOFF: 'PICKOFF',
       BALK: 'BALK',
       BOLK: 'BALK',
@@ -2474,6 +3479,7 @@ export class OfficialScoringService {
       triples: 0,
       homeRuns: 0,
       walks: 0,
+      hitByPitch: 0,
       strikeouts: 0,
       runs: 0,
       rbis: 0,
@@ -2642,7 +3648,15 @@ export class OfficialScoringService {
   }
 
   private sanitizeLineupEntries(
-    entries: Array<{ identificationNumber: string; battingOrder: number; fieldPosition: string }> | undefined,
+    entries:
+      | Array<{
+          identificationNumber: string;
+          battingOrder: number | null;
+          fieldPosition: string;
+          lineupRole?: 'PLAYER' | 'DP' | 'FLEX' | 'EH';
+          jerseyNumber?: string;
+        }>
+      | undefined,
     fallbackPlayers: string[],
     field: string
   ) {
@@ -2652,7 +3666,9 @@ export class OfficialScoringService {
         : fallbackPlayers.map((identificationNumber, index) => ({
             identificationNumber,
             battingOrder: index + 1,
-            fieldPosition: 'NA'
+            fieldPosition: 'NA',
+            lineupRole: 'PLAYER' as const,
+            jerseyNumber: undefined
           }));
 
     if (source.length === 0) {
@@ -2665,13 +3681,33 @@ export class OfficialScoringService {
         `${field}.identificationNumber`
       );
 
-      const battingOrder = this.requireIntegerRange(entry.battingOrder, `${field}.battingOrder`, 1, 99);
+      const lineupRole = entry.lineupRole ?? 'PLAYER';
+      if (!['PLAYER', 'DP', 'FLEX', 'EH'].includes(lineupRole)) {
+        throw new BadRequestException(`${field}.lineupRole invalido.`);
+      }
+
+      const battingOrder =
+        entry.battingOrder === null
+          ? null
+          : this.requireIntegerRange(entry.battingOrder, `${field}.battingOrder`, 1, 13);
+      if ((lineupRole === 'FLEX') !== (battingOrder === null)) {
+        throw new BadRequestException(`${field}: FLEX debe ser el unico rol sin turno en el orden de bateo.`);
+      }
+
       const fieldPosition = this.normalizeFieldPosition(entry.fieldPosition, `${field}.fieldPosition`);
+      if (lineupRole === 'FLEX' && fieldPosition === 'NA') {
+        throw new BadRequestException(`${field}: FLEX debe tener una posicion defensiva.`);
+      }
+      const jerseyNumber = entry.jerseyNumber === undefined
+        ? null
+        : this.normalizeJerseyNumber(entry.jerseyNumber, `${field}.jerseyNumber`);
 
       return {
         identificationNumber,
         battingOrder,
-        fieldPosition
+        fieldPosition,
+        lineupRole,
+        jerseyNumber
       };
     });
 
@@ -2679,18 +3715,60 @@ export class OfficialScoringService {
     if (byPlayer.size !== normalized.length) {
       throw new BadRequestException(`${field} no puede tener cedulas repetidas.`);
     }
-
-    const byBattingOrder = new Set(normalized.map((entry) => entry.battingOrder));
-    if (byBattingOrder.size !== normalized.length) {
-      throw new BadRequestException(`${field} no puede tener posiciones de bateo repetidas.`);
+    const duplicatePosition = findDuplicateFieldPosition(normalized);
+    if (duplicatePosition) {
+      throw new BadRequestException(`${field}: la posición ${duplicatePosition} ya está ocupada; no se permiten posiciones repetidas.`);
     }
 
-    return [...normalized].sort((a, b) => a.battingOrder - b.battingOrder);
+    const battingEntries = normalized.filter((entry) => entry.battingOrder !== null);
+    if (battingEntries.length < 9 || battingEntries.length > 13) {
+      throw new BadRequestException(`${field} debe tener entre 9 y 13 bateadores.`);
+    }
+
+    if (normalized.length > 14) {
+      throw new BadRequestException(`${field} permite hasta 13 bateadores y un FLEX.`);
+    }
+
+    const byBattingOrder = new Set(battingEntries.map((entry) => entry.battingOrder));
+    if (byBattingOrder.size !== battingEntries.length) {
+      throw new BadRequestException(`${field} no puede tener posiciones de bateo repetidas.`);
+    }
+    const orderedBattingEntries = [...battingEntries].sort(
+      (left, right) => (left.battingOrder ?? 0) - (right.battingOrder ?? 0)
+    );
+    if (orderedBattingEntries.some((entry, index) => entry.battingOrder !== index + 1)) {
+      throw new BadRequestException(`${field} debe ordenar a los bateadores consecutivamente del 1 al total.`);
+    }
+
+    const designatedHitters = normalized.filter((entry) => entry.lineupRole === 'DP').length;
+    const flexPlayers = normalized.filter((entry) => entry.lineupRole === 'FLEX').length;
+    if (designatedHitters !== flexPlayers || flexPlayers > 1) {
+      throw new BadRequestException(`${field}: DP y FLEX deben registrarse juntos, con un jugador de cada rol.`);
+    }
+
+    const jerseyNumbers = normalized
+      .map((entry) => entry.jerseyNumber)
+      .filter((jerseyNumber): jerseyNumber is string => jerseyNumber !== null);
+    if (new Set(jerseyNumbers).size !== jerseyNumbers.length) {
+      throw new BadRequestException(`${field} no puede tener numeros de camiseta repetidos.`);
+    }
+
+    return [...normalized].sort(
+      (a, b) => (a.battingOrder ?? Number.MAX_SAFE_INTEGER) - (b.battingOrder ?? Number.MAX_SAFE_INTEGER)
+    );
+  }
+
+  private normalizeJerseyNumber(value: string, field: string) {
+    const normalized = this.requireText(value, field);
+    if (!/^\d{1,2}$/.test(normalized)) {
+      throw new BadRequestException(`${field} debe ser un numero de camiseta entre 0 y 99.`);
+    }
+    return normalized;
   }
 
   private normalizeFieldPosition(value: string, field: string) {
     const normalized = this.requireText(value, field).toUpperCase();
-    const accepted = ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH', 'NA'];
+    const accepted = lineupFieldPositions;
 
     if (!accepted.includes(normalized)) {
       throw new BadRequestException(

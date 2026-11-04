@@ -1,6 +1,7 @@
 import Link from 'next/link';
-import { notFound } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 import LiveScoringManagerDemo from './live-scoring-manager-demo';
+import TeamSheetInbox from './team-sheet-inbox';
 
 type ModuleView = {
   title: string;
@@ -15,8 +16,8 @@ const moduleViews: Record<string, ModuleView> = {
     actions: ['Cambiar ciudad', 'Filtrar por disciplina', 'Sugerir evento para validacion']
   },
   'live-scoring': {
-    title: 'Motor de Anotacion en Vivo',
-    summary: 'Control en tiempo real de conteo, outs, corredores, inning y jugadas clave.',
+    title: 'PIZARRA EN VIVO',
+    summary: '',
     actions: ['Registrar turno al bate', 'Actualizar pizarra', 'Cerrar juego y publicar estadisticas']
   },
   standings: {
@@ -42,13 +43,17 @@ const moduleViews: Record<string, ModuleView> = {
 };
 
 export default async function ModuleDemoPage({
-  params
+  params,
+  searchParams
 }: {
   params: Promise<{ slug: string }>;
+  searchParams: Promise<{ view?: string }>;
 }) {
   const { slug } = await params;
+  const { view } = await searchParams;
   const moduleView = moduleViews[slug];
   const isLiveScoring = slug === 'live-scoring';
+  if (isLiveScoring && view === 'private-example') redirect('/demo/live-scoring?view=scorekeeper');
 
   if (!moduleView) {
     notFound();
@@ -56,14 +61,15 @@ export default async function ModuleDemoPage({
 
   return (
     <main className="moduleView">
-      <header className="moduleHeader">
+      {!isLiveScoring ? <header className="moduleHeader">
         <p className="eyebrow">DEMO INTERACTIVA</p>
         <h1>{moduleView.title}</h1>
         <p>{moduleView.summary}</p>
-      </header>
+      </header> : null}
 
       {isLiveScoring ? (
-        <LiveScoringManagerDemo />
+        view === 'organizer' || view === 'scorekeeper' ?
+          <TeamSheetInbox view={view} /> : <LiveScoringManagerDemo rival={view === 'rival'} />
       ) : (
         <section className="actionsPanel" aria-label="Acciones del modulo">
           {moduleView.actions.map((action) => (

@@ -159,6 +159,30 @@ h1 {
 	color: var(--text-soft);
 }
 
+.liveScoringHeader {
+	grid-column: 1 / -1;
+}
+
+.liveScoringHeaderActions {
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
+}
+
+.liveScoringHeaderRow {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 0.75rem;
+}
+
+.liveScoringHeaderRow h1 {
+	margin: 0;
+	min-width: 0;
+	font-size: clamp(1.25rem, 6vw, 5rem);
+	line-height: 1;
+}
+
 .actionsPanel {
 	display: flex;
 	flex-wrap: wrap;
@@ -197,6 +221,10 @@ h1 {
 	font-size: 1.14rem;
 }
 
+.managerStepCard {
+	grid-column: 1 / -1;
+}
+
 .managerCard p {
 	margin: 0.55rem 0 0.85rem;
 	color: var(--text-soft);
@@ -216,7 +244,8 @@ h1 {
 	letter-spacing: 0.02em;
 }
 
-.managerField input {
+.managerField input,
+.managerField select {
 	width: 100%;
 	border: 1px solid rgba(16, 33, 45, 0.18);
 	border-radius: 10px;
@@ -262,6 +291,32 @@ h1 {
 	color: #17374a;
 }
 
+.managerSteps {
+	grid-column: 1 / -1;
+}
+
+.managerSteps ol {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.6rem;
+	padding: 0;
+	list-style: none;
+}
+
+.managerSteps li {
+	padding: 0.65rem 0.85rem;
+	border: 1px solid #c4dbea;
+	border-radius: 12px;
+	background: #f4f9fc;
+	color: #355a6f;
+	font-weight: 700;
+}
+
+.managerSteps li[aria-current="step"] {
+	background: #163749;
+	color: #fff;
+}
+
 .managerStateText {
 	margin-top: 0.62rem;
 	font-size: 0.82rem;
@@ -278,6 +333,18 @@ h1 {
 	font-size: 0.82rem;
 	font-weight: 700;
 	margin-bottom: 0.68rem;
+}
+
+.demoJerseyTable {
+	width: 100%;
+	border-collapse: collapse;
+}
+
+.demoJerseyTable th,
+.demoJerseyTable td {
+	padding: 0.4rem;
+	text-align: left;
+	border-bottom: 1px solid #d3e2ec;
 }
 
 .chipWrap {
@@ -372,6 +439,839 @@ h1 {
 	color: #8a2f2f;
 }
 
+.lineupPreview {
+	grid-column: 1 / -1;
+	padding: clamp(1rem, 3vw, 1.5rem);
+	border: 1px solid rgba(16, 33, 45, 0.14);
+	border-radius: 20px;
+	background: linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(240, 248, 249, 0.94));
+	box-shadow: 0 14px 32px rgba(15, 29, 40, 0.1);
+}
+
+.lineupPreviewHeader {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 1rem;
+	padding-bottom: 1rem;
+	border-bottom: 1px solid rgba(16, 33, 45, 0.12);
+}
+
+.lineupPreviewEyebrow {
+	margin: 0 0 0.3rem;
+	color: #1d7887;
+	font-size: 0.7rem;
+	font-weight: 800;
+	letter-spacing: 0.12em;
+}
+
+.lineupPreviewHeader h2 {
+	margin: 0;
+	color: var(--bg-ink);
+	font-size: clamp(1.35rem, 3vw, 1.8rem);
+}
+
+.lineupPreviewHeader p:last-child {
+	margin: 0.35rem 0 0;
+	color: var(--text-soft);
+	font-size: 0.88rem;
+}
+
+.lineupPreviewCount {
+	flex: 0 0 auto;
+	padding: 0.38rem 0.68rem;
+	border-radius: 999px;
+	background: #e8f4ee;
+	color: #286344;
+	font-size: 0.78rem;
+	font-weight: 800;
+}
+
+.lineupPreviewGrid {
+	display: grid;
+	grid-template-columns: minmax(260px, 0.95fr) minmax(280px, 1.05fr);
+	gap: clamp(1rem, 4vw, 2.5rem);
+	align-items: center;
+	padding-top: 1rem;
+}
+
+.lineupPreviewList {
+	display: grid;
+	gap: 0.42rem;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.lineupPreviewPlayer {
+	display: grid;
+	grid-template-columns: 1.7rem 2.3rem minmax(0, 1fr) minmax(4.5rem, 0.7fr);
+	align-items: center;
+	gap: 0.5rem;
+	min-height: 2.6rem;
+	padding: 0.35rem 0.55rem;
+	border: 1px solid #e0e9ed;
+	border-radius: 11px;
+	background: rgba(255, 255, 255, 0.8);
+}
+
+.lineupPreviewOrder {
+	color: #66808d;
+	font-size: 0.82rem;
+	font-weight: 800;
+	text-align: center;
+}
+
+.lineupPreviewNumber {
+	display: grid;
+	width: 2rem;
+	height: 2rem;
+	place-items: center;
+	border-radius: 50%;
+	background: #173d4d;
+	color: #fff;
+	font-size: 0.77rem;
+	font-weight: 800;
+}
+
+.lineupPreviewName {
+	overflow: hidden;
+	color: #1c3442;
+	font-size: 0.88rem;
+	font-weight: 700;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.lineupPreviewPosition {
+	color: #1d7887;
+	font-size: 0.8rem;
+	font-weight: 900;
+	text-align: center;
+}
+
+.lineupFieldPanel h3 {
+	margin: 0 0 0.7rem;
+	color: #173d4d;
+	font-size: 0.94rem;
+}
+
+.lineupField {
+	display: grid;
+	grid-template: repeat(3, minmax(4.5rem, 1fr)) / repeat(3, minmax(4.2rem, 1fr));
+	gap: 0.45rem;
+	min-height: 15rem;
+	padding: 1rem;
+	border: 1px solid rgba(255, 255, 255, 0.5);
+	border-radius: 48% 48% 16px 16px;
+	background:
+		radial-gradient(ellipse at 50% 88%, #c79963 0 15%, transparent 15.5%),
+		linear-gradient(180deg, #5e9d72, #367451);
+	box-shadow: inset 0 0 0 1px rgba(22, 75, 50, 0.2);
+}
+
+.lineupFieldPosition {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 0.12rem;
+	width: 3.25rem;
+	height: 3.25rem;
+	justify-self: center;
+	align-self: center;
+	border: 1px solid rgba(255, 255, 255, 0.72);
+	border-radius: 50%;
+	background: rgba(17, 54, 43, 0.84);
+	color: #fff;
+	box-shadow: 0 3px 8px rgba(12, 38, 29, 0.24);
+}
+
+.lineupFieldPosition span {
+	max-width: 100%;
+	overflow-wrap: anywhere;
+	text-align: center;
+	font-size: 0.64rem;
+	font-weight: 700;
+	opacity: 0.82;
+}
+
+.lineupFieldPosition strong {
+	font-size: 0.86rem;
+}
+
+.positionLF,
+.positionSS,
+.position3 {
+	grid-column: 1;
+}
+
+.positionCF,
+.positionP,
+.positionC {
+	grid-column: 2;
+}
+
+.positionRF,
+.position2b,
+.position1b {
+	grid-column: 3;
+}
+
+.positionLF,
+.positionCF,
+.positionRF {
+	grid-row: 1;
+}
+
+.positionSS,
+.positionP,
+.position2b {
+	grid-row: 2;
+}
+
+.position3b,
+.positionC,
+.position1b {
+	grid-row: 3;
+}
+
+.lineupFieldNote {
+	margin: 0.55rem 0 0;
+	color: #617985;
+	font-size: 0.76rem;
+}
+
+.scorecardPreview {
+	grid-column: 1 / -1;
+	overflow: hidden;
+	border: 1px solid rgba(16, 33, 45, 0.14);
+	border-radius: 20px;
+	background: rgba(255, 255, 255, 0.96);
+	box-shadow: 0 14px 32px rgba(15, 29, 40, 0.1);
+}
+
+.privateSheetHeader {
+	display: flex;
+	justify-content: space-between;
+	align-items: flex-start;
+	gap: 1rem;
+	flex-wrap: wrap;
+}
+
+.managerCard .privateLiveScoringTitle {
+	margin: 0 0 0.4rem;
+	font-size: 0.85rem;
+	line-height: 1.2;
+}
+
+.privateSummaryHeader {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 5.5rem;
+	align-items: center;
+	gap: 0.5rem;
+	margin-bottom: 0.3rem;
+}
+
+.privateBaseDiamond {
+	display: block;
+	width: 5.5rem;
+	height: auto;
+}
+
+.privateDiamondBase rect {
+	fill: #fff;
+	stroke: #58706b;
+	stroke-width: 1.5;
+}
+
+.privateDiamondBase[data-occupied="true"] rect {
+	fill: #f5bb45;
+	stroke: #875b11;
+}
+
+.privateDiamondRunner {
+	fill: #163749;
+	stroke: #fff;
+	stroke-width: 0.5;
+}
+
+.privateDiamondBase text {
+	fill: #163749;
+	font-size: 10px;
+	font-weight: 800;
+}
+
+.privateLineScoreScroll {
+	overflow-x: auto;
+}
+
+.privateLineScore {
+	width: 100%;
+	min-width: 22rem;
+	border-collapse: collapse;
+	font-size: 0.75rem;
+	line-height: 1.2;
+	font-variant-numeric: tabular-nums;
+}
+
+.privateLineScoreStatus {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 0.2rem 0.6rem;
+	font-size: 0.75rem;
+	line-height: 1.3;
+}
+
+.privatePitchCount {
+	font-weight: 700;
+	white-space: nowrap;
+}
+
+.privateLineScore th,
+.privateLineScore td {
+	padding: 0.25rem 0.35rem;
+	border-bottom: 1px solid #c4dbea;
+	text-align: center;
+}
+
+.privateLineScore th[scope="row"] {
+	min-width: 7.5rem;
+	text-align: left;
+}
+
+.privateLineScore th span,
+.privateLineScore th small {
+	display: block;
+}
+
+.privateLineScore th small {
+	font-size: 0.65rem;
+	font-weight: 400;
+}
+
+.privateLineScore tr[aria-current="true"] {
+	background: #e6f4f3;
+}
+
+.privateLineScore td:last-child,
+.privateLineScoreCurrent {
+	font-weight: 800;
+}
+
+.privateLineScoreCurrent {
+	outline: 1px solid #24663d;
+	outline-offset: -1px;
+}
+
+.privateBattingQueue {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 0.4rem;
+	list-style: none;
+	padding: 0;
+	margin: 0.5rem 0 0;
+}
+
+.privateBattingQueue li {
+	display: grid;
+	align-content: start;
+	gap: 0.15rem;
+	min-width: 0;
+	border: 1px solid #c4dbea;
+	border-radius: 8px;
+	padding: 0.4rem 0.35rem;
+	font-size: 0.75rem;
+	line-height: 1.2;
+	overflow-wrap: anywhere;
+}
+
+.privateBattingQueue strong,
+.privateBattingQueue small {
+	font-size: 0.65rem;
+}
+
+.privateBattingQueueLabel {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 0.25rem;
+}
+
+.privateBattingRecord {
+	font-size: 0.65rem;
+	font-weight: 800;
+}
+
+.privateBattingPosition {
+	font-size: 0.65rem;
+	font-weight: 800;
+}
+
+.privateBattingMeta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.15rem 0.4rem;
+}
+
+.privateBattingAverage {
+	white-space: nowrap;
+}
+
+.privateBattingQueue li[aria-current="true"] {
+	background: #163749;
+	color: #fff;
+}
+
+.managerButtonOutline.privatePlayOnBase {
+	background: #e3f2e7;
+	border-color: #8db99b;
+	color: #174b2b;
+}
+
+.managerButtonOutline.privatePlayOut {
+	background: #fbe7e5;
+	border-color: #d9a09a;
+	color: #842e28;
+}
+
+.managerButtonOutline.privateUndoButton {
+	background: #fff1cf;
+	border-color: #d0a746;
+	color: #674500;
+}
+
+.privatePlayToolbar > .managerButtonSolid + .privatePlayOnBase,
+.privatePlayToolbar > .privatePlayOnBase + .privatePlayOut,
+.privatePlayToolbar > .privateUndoButton {
+	margin-inline-start: 0.35rem;
+}
+
+.managerField.privateGameLength {
+	display: flex;
+	align-items: center;
+	align-self: center;
+	flex-wrap: wrap;
+	margin: 0;
+}
+
+.managerField.privateGameLength select {
+	width: auto;
+	max-width: 100%;
+	padding: 0.45rem 0.6rem;
+	font-size: 0.79rem;
+}
+
+.privateFinishPrompt .managerButtonRow {
+	margin-bottom: 0;
+}
+
+.privateRunAccounting summary {
+	cursor: pointer;
+	font-weight: 700;
+}
+
+.privateRunAccounting > details {
+	padding-block: 0.6rem;
+	border-top: 1px solid #c4dbea;
+}
+
+.privateRunReview {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+	gap: 0.65rem;
+	align-items: end;
+}
+
+.privateBases {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+	gap: 0.6rem;
+	list-style: none;
+	padding: 0;
+}
+
+.privateBases li {
+	display: grid;
+	align-content: start;
+	gap: 0.4rem;
+	border: 1px solid #c4dbea;
+	border-radius: 10px;
+	padding: 0.8rem;
+}
+
+.privateBases > li[data-occupied="true"] {
+	background: #dce9ec;
+	border-color: #7899a5;
+	padding-top: 0.4rem;
+	padding-bottom: 0;
+}
+
+.privateBaseButton {
+	display: grid;
+	gap: 0.4rem;
+	width: 100%;
+	border: 0;
+	padding: 0.3rem;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.privateBaseButtonOccupied {
+	position: relative;
+	min-width: 0;
+	/* Redistribute card padding to fit the details without resizing the card. */
+	padding-block: 0.7rem 1.1rem;
+}
+
+/* Preserve the original two-line footprint, including wrapped names. */
+.privateBaseSize {
+	display: grid;
+	gap: 0.4rem;
+	visibility: hidden;
+}
+
+.privateBaseRunnerContent {
+	position: absolute;
+	inset: 0.1rem 0.3rem;
+	display: grid;
+	grid-template-rows: 1.35rem 0.9rem 0.8rem 0.8rem minmax(0.8rem, 1fr);
+}
+
+.privateBaseHeading {
+	font-size: 0.85rem;
+	line-height: 1.2;
+}
+
+.privateBaseRunnerMeta,
+.privateBaseRunnerAverage,
+.privateBaseRunnerStats {
+	font-size: 0.65rem;
+	line-height: 1.2;
+	white-space: nowrap;
+}
+
+.privateBaseRunnerStats {
+	font-weight: 800;
+}
+
+.privateBaseRunnerMeta {
+	color: var(--bg-ink);
+	font-weight: 800;
+}
+
+.privateBaseRunnerName {
+	min-width: 0;
+	overflow: hidden;
+	font-size: 0.8rem;
+	line-height: 1.1;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.privateBaseMenu {
+	display: grid;
+	gap: 0.4rem;
+	min-width: 0;
+}
+
+.privateBaseMenu button {
+	white-space: normal;
+	text-align: left;
+}
+
+.privateAdvanceDestinations {
+	border-left: 3px solid #24663d;
+	padding-left: 0.6rem;
+}
+
+.privateControls {
+	border: 1px solid #c4dbea;
+	border-radius: 12px;
+	padding: 1rem;
+	min-width: 0;
+}
+
+.privateControls legend {
+	font-weight: 700;
+	padding: 0 0.4rem;
+}
+
+.privateCheck {
+	display: flex;
+	gap: 0.5rem;
+	align-items: flex-start;
+	margin: 0.8rem 0;
+}
+
+.privateScorecardTable td.privateInningCell {
+	min-width: 5rem;
+	max-width: 9rem;
+	white-space: normal;
+}
+
+.privateInningSummary {
+	display: block;
+	width: 100%;
+	max-width: 9rem;
+	min-height: 2.2rem;
+	margin: 0 auto;
+	padding: 0.35rem 0.4rem;
+	border: 1px solid #c4dbea;
+	border-radius: 6px;
+	background: #f3f8f9;
+	color: #274451;
+	font: inherit;
+	font-weight: 700;
+	line-height: 1.4;
+	white-space: normal;
+	cursor: help;
+	user-select: none;
+	-webkit-touch-callout: none;
+	touch-action: manipulation;
+}
+
+.privateInningSummary:focus-visible {
+	outline: 2px solid #24663d;
+	outline-offset: 2px;
+}
+
+.privateInningDetail {
+	position: fixed;
+	z-index: 20;
+	left: 50%;
+	bottom: 1rem;
+	transform: translateX(-50%);
+	box-sizing: border-box;
+	width: min(30rem, calc(100vw - 2rem));
+	max-height: 65vh;
+	overflow-y: auto;
+	padding: 0.85rem 1rem;
+	border: 1px solid #c4dbea;
+	border-radius: 10px;
+	background: #fff;
+	color: #274451;
+	box-shadow: 0 8px 28px #12324133;
+	font-size: 0.82rem;
+	line-height: 1.45;
+	pointer-events: none;
+}
+
+.privateInningDetail ol {
+	margin: 0.5rem 0 0;
+	padding-left: 1.4rem;
+}
+
+.privateInningDetail li + li {
+	margin-top: 0.2rem;
+}
+
+.scorecardTable tr[aria-current="true"] th,
+.scorecardTable tr[aria-current="true"] td {
+	background: #e6f4f3;
+}
+
+.scorecardPreviewHeader {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 1rem;
+	padding: clamp(1rem, 3vw, 1.5rem);
+	border-bottom: 1px solid #e1eaed;
+}
+
+.scorecardPreviewHeader h2 {
+	margin: 0;
+	color: var(--bg-ink);
+	font-size: clamp(1.25rem, 3vw, 1.7rem);
+}
+
+.scorecardPreviewHeader p:last-child {
+	margin: 0.35rem 0 0;
+	color: var(--text-soft);
+	font-size: 0.88rem;
+}
+
+.scorecardLiveBadge {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.42rem;
+	flex: 0 0 auto;
+	padding: 0.42rem 0.7rem;
+	border: 1px solid #b9e2c7;
+	border-radius: 999px;
+	background: #edf9f1;
+	color: #24663d;
+	font-size: 0.7rem;
+	font-weight: 900;
+	letter-spacing: 0.05em;
+}
+
+.scorecardLiveBadge span {
+	width: 0.48rem;
+	height: 0.48rem;
+	border-radius: 50%;
+	background: #2f9b56;
+	box-shadow: 0 0 0 3px rgba(47, 155, 86, 0.13);
+}
+
+.scorecardTableScroll {
+	overflow-x: auto;
+	overscroll-behavior-x: contain;
+}
+
+.scorecardTable {
+	width: 100%;
+	min-width: 860px;
+	border-collapse: separate;
+	border-spacing: 0;
+	color: #274451;
+	font-size: 0.78rem;
+	text-align: center;
+}
+
+.scorecardTable th,
+.scorecardTable td {
+	height: 3.2rem;
+	padding: 0.45rem 0.55rem;
+	border-bottom: 1px solid #e8eef0;
+	border-right: 1px solid #edf1f2;
+	white-space: nowrap;
+}
+
+.scorecardTable thead th {
+	height: 2.5rem;
+	background: #f3f8f9;
+	color: #617b87;
+	font-size: 0.67rem;
+	font-weight: 900;
+	letter-spacing: 0.04em;
+}
+
+.scorecardTable thead th:nth-child(2),
+.scorecardTable thead th:nth-child(4),
+.scorecardTable thead th:nth-child(6) {
+	background: #eaf3f5;
+}
+
+.scorecardPlayerHeading,
+.scorecardPlayer {
+	position: sticky;
+	left: 0;
+	z-index: 1;
+	min-width: 190px;
+	text-align: left;
+}
+
+.scorecardPlayerHeading {
+	z-index: 2;
+	background: #f3f8f9;
+}
+
+.scorecardPlayer {
+	display: flex;
+	align-items: center;
+	gap: 0.55rem;
+	background: #fff;
+}
+
+.scorecardOrder {
+	display: grid;
+	width: 1.45rem;
+	height: 1.45rem;
+	flex: 0 0 auto;
+	place-items: center;
+	border-radius: 50%;
+	background: #e9f2f5;
+	color: #53717e;
+	font-size: 0.68rem;
+	font-weight: 900;
+}
+
+.scorecardPlayerInfo {
+	display: grid;
+	gap: 0.12rem;
+}
+
+.scorecardPlayerInfo strong {
+	color: #1d3947;
+	font-size: 0.76rem;
+}
+
+.scorecardPlayerInfo small {
+	color: #718792;
+	font-size: 0.66rem;
+	font-weight: 700;
+}
+
+.scorecardInningCell {
+	min-width: 4.2rem;
+	background: #fff;
+}
+
+.scorecardNoPlay {
+	color: #c1cdd1;
+}
+
+.scorecardResult,
+.scorecardAtBat {
+	display: inline-block;
+	padding: 0.25rem 0.4rem;
+	border-radius: 6px;
+	background: #edf5f6;
+	color: #315d69;
+	font-size: 0.68rem;
+	font-weight: 900;
+}
+
+.scorecardAtBat {
+	background: #fff1dc;
+	color: #9b5b18;
+}
+
+.scorecardError {
+	display: inline-grid;
+	min-width: 2.5rem;
+	height: 1rem;
+	place-items: center;
+	margin-left: 0.22rem;
+	border-radius: 50%;
+	background: #fde9e7;
+	color: #b44237;
+	font-size: 0.62rem;
+	font-weight: 900;
+}
+
+.scorecardErrorTotal {
+	color: #b44237;
+	font-weight: 900;
+}
+
+.scorecardLegend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.42rem 0.85rem;
+	padding: 0.85rem 1rem 0;
+	color: #607986;
+	font-size: 0.7rem;
+}
+
+.scorecardLegend strong {
+	color: #315d69;
+}
+
+.scorecardPreviewNote {
+	margin: 0;
+	padding: 0.75rem 1rem 1rem;
+	color: #728691;
+	font-size: 0.72rem;
+}
+
 @keyframes rise {
 	from {
 		opacity: 0;
@@ -397,4 +1297,31 @@ h1 {
 	.managerCard {
 		grid-column: 1 / -1;
 	}
+
+	.lineupPreviewGrid {
+		grid-template-columns: 1fr;
+	}
+
+	.lineupPreviewHeader {
+		align-items: flex-start;
+	}
+}
+.officialScorecard {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	grid-column: 1 / -1;
+	gap: 0.9rem;
+	min-width: 0;
+}
+
+.officialScorecard > * {
+	grid-column: 1 / -1;
+	min-width: 0;
+}
+
+.officialScoringControls {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
 }
