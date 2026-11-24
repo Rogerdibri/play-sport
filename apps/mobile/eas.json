@@ -11,14 +11,14 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_PLAYSPORT_WEB_ORIGIN": "https://playsport.onrender.com"
+        "EXPO_PUBLIC_PLAYSPORT_WEB_ORIGIN": "https://playsport.fly.dev"
       }
     },
     "production": {
       "channel": "production",
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_PLAYSPORT_WEB_ORIGIN": "https://playsport.onrender.com"
+        "EXPO_PUBLIC_PLAYSPORT_WEB_ORIGIN": "https://playsport.fly.dev"
       }
     }
   },

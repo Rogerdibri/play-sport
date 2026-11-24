@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const origin = process.env.PLAYSPORT_WEB_ORIGIN || process.env.RENDER_EXTERNAL_URL;
+const origin = process.env.PLAYSPORT_WEB_ORIGIN || (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : '');
 if (!origin) {
   console.error('Configura PLAYSPORT_WEB_ORIGIN con la dirección HTTPS pública de PlaySport.');
   process.exit(1);

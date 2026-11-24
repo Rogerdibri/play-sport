@@ -11,7 +11,7 @@
     "web": "expo start --web",
     "eas-build-post-install": "npm run build --workspace @playsport/shared",
     "build:apk": "npx eas-cli@latest build --platform android --profile preview",
-    "update:preview": "EXPO_PUBLIC_PLAYSPORT_WEB_ORIGIN=https://playsport.onrender.com npx eas-cli@latest update --channel preview --platform android"
+    "update:preview": "EXPO_PUBLIC_PLAYSPORT_WEB_ORIGIN=https://playsport.fly.dev npx eas-cli@latest update --channel preview --platform android"
   },
   "dependencies": {
     "@expo/metro-runtime": "~4.0.1",
