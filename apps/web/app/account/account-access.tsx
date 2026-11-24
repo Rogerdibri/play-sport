@@ -132,7 +132,7 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
         <p>Esta cuenta no hereda permisos de manager, organizador ni anotador por elegir un rol.</p>
         <p>{account.localTestAccess
           ? 'Esta sesión no vence por inactividad y se mantiene al cerrar el navegador. Cerrar sesión o borrar las cookies requiere volver a entrar. Cambiar la contraseña cierra las otras sesiones.'
-          : 'La sesión vence tras 30 minutos sin consultar el servicio o al cumplir 24 horas. Cambiar la contraseña cierra las otras sesiones.'}</p>
+          : 'Tu sesión se mantiene en este dispositivo aunque cierres el navegador, hasta que cierres sesión o pases 30 días sin entrar. Cambiar la contraseña cierra las otras sesiones.'}</p>
         <button type="button" className="managerButtonOutline" disabled={busy} onClick={() => void run(async () => {
           await requestAccount('logout', {});
           setAccount(null); setEmail(''); setName(''); setPassword(''); setCurrentPassword(''); setNextPassword(''); setConfirmation('');

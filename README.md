@@ -658,7 +658,8 @@ excluido de Git. Las contraseñas se guardan con scrypt, salt aleatorio y
 comparación constante; se requieren de 15 a 128 caracteres al crearlas.
 Los tokens de sesión se guardan únicamente como hashes. El navegador recibe
 una cookie HttpOnly/SameSite=Strict, nunca un token en localStorage.
-Las sesiones caducan tras 30 minutos sin consultar la API o a las 24 horas;
+Las sesiones se conservan en el dispositivo hasta cerrar sesión, 30 días sin
+consultar la API o 400 días de antigüedad (cookie de 400 días);
 cambiar la contraseña revoca las sesiones previas y crea una nueva.
 Los intentos de registro y acceso están limitados en la base persistente.
 
@@ -1562,7 +1563,7 @@ absoluta. Su cookie sigue siendo HttpOnly y SameSite Strict, con 400 días y
 renovación al consultar la cuenta. Cerrar el navegador no cierra la sesión;
 borrar sus cookies o cerrar sesión explícitamente sí requiere volver a entrar.
 Logout y cambio de contraseña siguen revocando los tokens, también del tester.
-Las cuentas normales conservan sus límites de 24 horas/30 minutos.
+Las cuentas normales caducan tras 30 días sin uso o 400 días de antigüedad.
 
 Todo botón **Cambiar rol** de la web vuelve directamente a `/` y muestra
 la selección de los seis roles, también para el tester. No abre un selector

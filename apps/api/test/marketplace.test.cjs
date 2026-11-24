@@ -264,7 +264,7 @@ test('invalid prices, photos, auction rules, payload fields and duplicate messag
   const report = e.market.perform(e.other.token, command('report', { listingId, reason: 'Prueba de reporte' }));
   assert.match(report.notice, /revisión pendiente/);
   assert.equal(e.market.read().listings[0].status, 'closed');
-  e.advance(31 * 60000);
+  e.advance(31 * 24 * 60 * 60000);
   const expired = e.market.read(e.buyer.token);
   assert.equal(expired.viewer, null); assert.equal(expired.sessionExpired, true); assert.deepEqual(expired.orders, []);
 });

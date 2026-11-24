@@ -62,7 +62,7 @@ test('only the privately configured local tester retains its session after idle,
   const normal = await e.service.register(registration('normal@example.test'), 'normal');
   const config = join(dirname(e.path), 'local-tester.json');
   writeFileSync(config, JSON.stringify({ version: 1, accountId: tester.account.id }), { mode: 0o600 });
-  e.clock(31 * 60 * 1000);
+  e.clock(31 * 24 * 60 * 60 * 1000);
   bad(() => e.service.authenticate(normal.token), 401);
   assert.equal(e.service.authenticate(tester.token).localTestAccess, true);
   e.clock(365 * 24 * 60 * 60 * 1000);
@@ -76,7 +76,7 @@ test('only the privately configured local tester retains its session after idle,
   const login = await reopened.login({ email: tester.account.email, password: registration().password }, 'tester');
   assert.equal(login.account.localTestAccess, true);
   unlinkSync(config);
-  e.clock(31 * 60 * 1000);
+  e.clock(31 * 24 * 60 * 60 * 1000);
   bad(() => reopened.authenticate(login.token), 401);
 });
 
@@ -89,7 +89,7 @@ test('local tester configuration never grants persistent access in production or
     process.env.NODE_ENV = 'production';
     process.env.PLAYSPORT_WEB_ORIGIN = 'https://playsport.example.test';
     assert.equal(e.service.authenticate(tester.token).localTestAccess, undefined);
-    e.clock(31 * 60 * 1000); bad(() => e.service.authenticate(tester.token), 401);
+    e.clock(31 * 24 * 60 * 60 * 1000); bad(() => e.service.authenticate(tester.token), 401);
     process.env.NODE_ENV = 'development';
     process.env.PLAYSPORT_WEB_ORIGIN = 'http://playsport.example.test';
     bad(() => e.service.authenticate(tester.token), 401);
@@ -133,7 +133,7 @@ test('logout or expiry during password hashing prevents password updates and can
       currentPassword: input.password, newPassword: 'Una nueva frase ficticia de prueba 456'
     });
     if (reason === 'logout') e.service.logout(registered.token);
-    else e.clock(30 * 60 * 1000);
+    else e.clock(30 * 24 * 60 * 60 * 1000);
     await rejects(() => pending, 401);
     bad(() => e.service.authenticate(registered.token), 401);
     const login = await e.service.login({ email: input.email, password: input.password }, reason);
@@ -188,10 +188,10 @@ test('logout is idempotent, sessions expire by idle time and absolute time, and 
   assert.equal(e.service.authenticate(changed.token).id, one.account.id);
   await rejects(() => e.service.login({ email: input.email, password: input.password }, 'three'), 401);
   const next = await e.service.login({ email: input.email, password: 'Otra frase para la cuenta 456' }, 'four');
-  e.clock(30 * 60 * 1000); bad(() => e.service.authenticate(next.token), 401);
+  e.clock(30 * 24 * 60 * 60 * 1000); bad(() => e.service.authenticate(next.token), 401);
   const active = await e.service.login({ email: input.email, password: 'Otra frase para la cuenta 456' }, 'five');
-  for (let index = 0; index < 71; index++) { e.clock(20 * 60 * 1000); e.service.authenticate(active.token); }
-  e.clock(20 * 60 * 1000); bad(() => e.service.authenticate(active.token), 401);
+  for (let index = 0; index < 13; index++) { e.clock(29 * 24 * 60 * 60 * 1000); e.service.authenticate(active.token); }
+  e.clock(29 * 24 * 60 * 60 * 1000); bad(() => e.service.authenticate(active.token), 401);
   const last = await e.service.login({ email: input.email, password: 'Otra frase para la cuenta 456' }, 'six');
   e.service.logout(last.token); e.service.logout(last.token);
   bad(() => e.service.authenticate(last.token), 401);

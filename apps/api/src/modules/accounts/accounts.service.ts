@@ -17,8 +17,8 @@ import { createGameReport, readAccountScorecard, readPrivateSave, replayPrivate,
 
 type Options = { path: string; now?: () => number };
 type StoredAccount = { id: string; email: string; display_name: string; password_hash: string; created_at: number };
-const absoluteSessionMs = 24 * 60 * 60 * 1000;
-const idleSessionMs = 30 * 60 * 1000;
+const absoluteSessionMs = 400 * 24 * 60 * 60 * 1000;
+const idleSessionMs = 30 * 24 * 60 * 60 * 1000;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const invalidSession = () => new UnauthorizedException('La sesión no es válida o venció. Inicia sesión.');
 const hasControls = (value: string) => [...value].some(character => {

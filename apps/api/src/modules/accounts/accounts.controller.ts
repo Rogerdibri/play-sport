@@ -126,8 +126,8 @@ export class AccountsController {
     return socket;
   }
 
-  private cookie(response: ServerResponse, token: string, clear = false, persistent = false) {
-    response.setHeader('Set-Cookie', `${this.cookieName()}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : persistent ? 34560000 : 86400}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
+  private cookie(response: ServerResponse, token: string, clear = false) {
+    response.setHeader('Set-Cookie', `${this.cookieName()}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : 34560000}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
     response.setHeader('Cache-Control', 'no-store');
   }
 
@@ -135,7 +135,7 @@ export class AccountsController {
   async register(@Req() request: IncomingMessage, @Res({ passthrough: true }) response: ServerResponse, @Body() body: unknown) {
     this.origin(request);
     const result = await this.accounts.register(body, this.address(request));
-    this.cookie(response, result.token, false, result.account.localTestAccess === true);
+    this.cookie(response, result.token);
     return { account: result.account };
   }
 
@@ -144,7 +144,7 @@ export class AccountsController {
   async login(@Req() request: IncomingMessage, @Res({ passthrough: true }) response: ServerResponse, @Body() body: unknown) {
     this.origin(request);
     const result = await this.accounts.login(body, this.address(request));
-    this.cookie(response, result.token, false, result.account.localTestAccess === true);
+    this.cookie(response, result.token);
     return { account: result.account };
   }
 
@@ -152,7 +152,7 @@ export class AccountsController {
   me(@Req() request: IncomingMessage, @Res({ passthrough: true }) response: ServerResponse) {
     response.setHeader('Cache-Control', 'no-store');
     const token = this.token(request), account = this.accounts.authenticate(token);
-    if (account.localTestAccess && token) this.cookie(response, token, false, true);
+    if (account.localTestAccess && token) this.cookie(response, token);
     return { account };
   }
 
@@ -169,7 +169,7 @@ export class AccountsController {
   async password(@Req() request: IncomingMessage, @Res({ passthrough: true }) response: ServerResponse, @Body() body: unknown) {
     this.origin(request);
     const result = await this.accounts.changePassword(this.token(request), body);
-    this.cookie(response, result.token, false, result.account.localTestAccess === true);
+    this.cookie(response, result.token);
     return { account: result.account };
   }
   @Post('photo')
