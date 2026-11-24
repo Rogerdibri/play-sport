@@ -8,11 +8,11 @@ const { calculateOfficialStandings, readOfficialStandingGames, readOfficialGames
 const bad = (fn, status) => assert.throws(fn, error => error.getStatus?.() === status);
 beforeEach(t => t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-05T12:00:00Z') }));
 
-function setup() {
+function setup(scorer = { actorId: 'score', identificationNumber: 'SCORE1000' }) {
   const service = new OfficialScoringService();
   service.configureTournamentAuthorization({ tournamentId: 'tour', organizerId: 'org', organizerIdentificationNumber: 'ORG1000',
-    scorekeeperIds: ['score', 'other'], scorekeeperIdentities: [
-      { actorId: 'score', identificationNumber: 'SCORE1000' }, { actorId: 'other', identificationNumber: 'OTHER1000' }
+    scorekeeperIds: [scorer.actorId, 'other'], scorekeeperIdentities: [
+      scorer, { actorId: 'other', identificationNumber: 'OTHER1000' }
     ] });
   for (const teamId of ['home', 'away']) {
     for (let i = 0; i < 9; i++) service.registerGlobalPlayer({ actorId: 'org',
@@ -22,7 +22,7 @@ function setup() {
   }
   for (const gameId of ['one', 'two']) {
     service.configureGameTeams({ gameId, tournamentId: 'tour', organizerId: 'org', homeTeamId: 'home', awayTeamId: 'away' });
-    service.configureGameAuthorization({ gameId, tournamentId: 'tour', organizerId: 'org', scorekeeperIds: ['score'] });
+    service.configureGameAuthorization({ gameId, tournamentId: 'tour', organizerId: 'org', scorekeeperIds: [scorer.actorId] });
     service.configureGameDetails({ gameId, tournamentId: 'tour', organizerId: 'org',
       details: { tournamentName: 'Torneo de prueba', homeTeamName: 'Locales', awayTeamName: 'Visitantes',
         date: '2026-11-05', time: '18:00', venue: 'Estadio de prueba' } });
@@ -31,9 +31,9 @@ function setup() {
         fieldPosition: ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF'][i] })) });
   }
   const state = (id = 'one') => structuredClone(service.getOfficialState(id, 'tour'));
-  const send = (operation, id = 'one') => service.submitOfficialUpdate({ gameId: id, tournamentId: 'tour', actorId: 'score',
+  const send = (operation, id = 'one') => service.submitOfficialUpdate({ gameId: id, tournamentId: 'tour', actorId: scorer.actorId,
     actorRole: 'scorekeeper', expectedOfficialVersion: state(id).state.officialVersion, patch: {}, ...operation });
-  const declaration = () => ({ gameId: 'one', tournamentId: 'tour', actorId: 'score', actorRole: 'scorekeeper',
+  const declaration = () => ({ gameId: 'one', tournamentId: 'tour', actorId: scorer.actorId, actorRole: 'scorekeeper',
     expectedOfficialVersion: state().state.officialVersion, teamId: 'home', reason: 'Aplicación de la regla cuestionada.' });
   const decision = () => ({ gameId: 'one', tournamentId: 'tour', organizerId: 'org',
     expectedOfficialVersion: state().state.officialVersion, winnerTeamId: 'away',
@@ -161,8 +161,8 @@ test('one decision propagates to public, manager, organizer, scorekeeper and tab
     [['away', 1, 0, 1, 5], ['home', 0, 1, 5, 1]]);
 });
 test('HTTP protest and resolution routes enforce the same lifecycle and expose public standings', async t => {
-  const e = setup(); e.start();
   const account = await require('./sporting-account-fixture.cjs')(t);
+  const e = setup(await account.verifiedScorekeeper()); e.start();
   const app = await NestFactory.create({ module: class ProtestTestModule {},
     controllers: [OfficialScoringController], providers: [account.provider, { provide: OfficialScoringService, useValue: e.service }] }, { logger: false });
   account.manage(app);

@@ -6,10 +6,10 @@ const { NestFactory } = require('@nestjs/core');
 const { readOfficialGames, readOfficialObservation, readOfficialInterruptionArchive, readOfficialStandingGames, calculateOfficialStandings, currentAssignedGame, isGameSuspension } = require('@playsport/shared');
 const bad = (fn, status) => assert.throws(fn, e => e.getStatus?.() === status);
 beforeEach(t => t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-05T12:00:00Z') }));
-function setup() {
+function setup(scorer = { actorId: 'score', identificationNumber: 'SCORE1000' }) {
   const service = new OfficialScoringService();
   service.configureTournamentAuthorization({ tournamentId: 'tour', organizerId: 'org', organizerIdentificationNumber: 'ORG1000',
-    scorekeeperIds: ['score', 'other'], scorekeeperIdentities: [{ actorId: 'score', identificationNumber: 'SCORE1000' }, { actorId: 'other', identificationNumber: 'OTHER1000' }] });
+    scorekeeperIds: [scorer.actorId, 'other'], scorekeeperIdentities: [scorer, { actorId: 'other', identificationNumber: 'OTHER1000' }] });
   for (const teamId of ['home', 'away']) {
     for (let i = 0; i < 9; i++) service.registerGlobalPlayer({ actorId: 'org', player: { identificationNumber: `${teamId}${i}`, displayName: `Jugador ${teamId}${i}` } });
     service.configureTournamentTeamRoster({ tournamentId: 'tour', organizerId: 'org', teamId, managerId: `mgr-${teamId}`,
@@ -17,7 +17,7 @@ function setup() {
   }
   for (const gameId of ['one', 'two']) {
     service.configureGameTeams({ gameId, tournamentId: 'tour', organizerId: 'org', homeTeamId: 'home', awayTeamId: 'away' });
-    service.configureGameAuthorization({ gameId, tournamentId: 'tour', organizerId: 'org', scorekeeperIds: ['score'] });
+    service.configureGameAuthorization({ gameId, tournamentId: 'tour', organizerId: 'org', scorekeeperIds: [scorer.actorId] });
     service.configureGameDetails({ gameId, tournamentId: 'tour', organizerId: 'org', details: { tournamentName: 'Prueba', homeTeamName: 'Locales',
       awayTeamName: 'Visitantes', date: '2026-11-05', time: '18:00', venue: 'Estadio', stateId: 'VE-A', municipalityId: 'VE-A:libertador' } });
     for (const teamId of ['home', 'away']) service.configureGameLineup({ gameId, tournamentId: 'tour', teamId, managerId: `mgr-${teamId}`,
@@ -25,9 +25,9 @@ function setup() {
         jerseyNumber: String(i + 1), fieldPosition: ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF'][i] })) });
   }
   const state = (gameId = 'one') => structuredClone(service.getOfficialState(gameId, 'tour'));
-  const send = (operation, gameId = 'one') => service.submitOfficialUpdate({ gameId, tournamentId: 'tour', actorId: 'score', actorRole: 'scorekeeper',
+  const send = (operation, gameId = 'one') => service.submitOfficialUpdate({ gameId, tournamentId: 'tour', actorId: scorer.actorId, actorRole: 'scorekeeper',
     expectedOfficialVersion: state(gameId).state.officialVersion, patch: {}, ...operation });
-  const suspend = (patch = {}) => service.suspendGame({ gameId: 'one', tournamentId: 'tour', actorId: 'score', actorRole: 'scorekeeper',
+  const suspend = (patch = {}) => service.suspendGame({ gameId: 'one', tournamentId: 'tour', actorId: scorer.actorId, actorRole: 'scorekeeper',
     expectedOfficialVersion: state().state.officialVersion, cause: 'weather', scoreHandling: 'keep', reason: 'Lluvia intensa', ...patch });
   const reschedule = (patch = {}) => service.rescheduleGame({ gameId: 'one', tournamentId: 'tour', organizerId: 'org',
     expectedOfficialVersion: state().state.officialVersion, date: '2026-11-12', time: '19:30', ...patch });
@@ -155,15 +155,16 @@ test('protested and final games cannot be suspended or reopened through reschedu
   assert.equal(other.state().state.status, 'scheduled');
 });
 test('HTTP suspension, read-only archive and organizer rescheduling use validated versioned routes', async t => {
-  const e = setup(); e.send({ scorecardCommand: { kind: 'pitch', value: 'ball' } });
   const account = await require('./sporting-account-fixture.cjs')(t);
+  const scorer = await account.verifiedScorekeeper();
+  const e = setup(scorer); e.send({ scorecardCommand: { kind: 'pitch', value: 'ball' } });
   const app = await NestFactory.create({ module: class SuspensionTestModule {}, controllers: [OfficialScoringController],
     providers: [account.provider, { provide: OfficialScoringService, useValue: e.service }] }, { logger: false });
   account.manage(app);
   await app.listen(0, '127.0.0.1');
   const base = (await app.getUrl()) + '/official-scoring/games/one';
   const post = (path, body) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const body = { tournamentId: 'tour', actorId: 'score', actorRole: 'scorekeeper', expectedOfficialVersion: e.state().state.officialVersion,
+  const body = { tournamentId: 'tour', actorId: scorer.actorId, actorRole: 'scorekeeper', expectedOfficialVersion: e.state().state.officialVersion,
     cause: 'weather', scoreHandling: 'keep', reason: 'Lluvia' };
   assert.equal((await post('/suspension', { ...body, actorId: 'other' })).status, 403);
   const response = await post('/suspension', body);
