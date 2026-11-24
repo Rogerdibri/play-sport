@@ -54,7 +54,10 @@ export type RunAccountingEvent = {
   scored: string[];
   totalRuns: number;
   misplay?: 'error' | 'passedBall';
+  passedThirdStrike?: boolean;
   errorOuts?: number;
+  errorSavedRunnerId?: string;
+  tieBreakerRunnerId?: string;
   unknownAdvance?: boolean;
   homeRun?: boolean;
   uncertainPlay?: boolean;
@@ -134,7 +137,8 @@ export function accountRuns(current: RunAccounting, event: RunAccountingEvent): 
     }
   }
   for (const id of event.basesBefore) {
-    if (id && !next.runners[id]) next.runners[id] = responsibility(true);
+    if (id && !next.runners[id]) next.runners[id] = id === event.tieBreakerRunnerId ?
+      { ...responsibility(), extraLife: true, extraLifeForPitcher: true } : responsibility(true);
   }
   if (event.replacement) {
     const { outgoing, incoming } = event.replacement;
@@ -143,13 +147,15 @@ export function accountRuns(current: RunAccounting, event: RunAccountingEvent): 
   }
   const priorChance = event.batterId ? next.extraChances[event.batterId] : undefined;
   let newOutIds: string[] = [];
-  if (event.misplay === 'error') {
-    if (event.errorOuts === undefined) next.unknownOuts += 1;
+  if (event.misplay === 'error' || event.passedThirdStrike) {
+    const errorOuts = event.passedThirdStrike ? 1 : event.errorOuts;
+    if (errorOuts === undefined) next.unknownOuts += 1;
     else {
-      if (event.errorOuts > 1) next.unknownOuts += 1;
+      if (errorOuts > 1) next.unknownOuts += 1;
       const alreadyOut = Boolean(priorChance) || !event.plateCompleted && event.basesBefore.some((id, base) =>
-        id && event.basesAfter[base] !== id && next.runners[id]?.virtualOutId);
-      newOutIds = Array.from({ length: Math.max(0, Math.min(1, event.errorOuts) - (alreadyOut ? 1 : 0)) },
+        id && event.basesAfter[base] !== id && next.runners[id]?.virtualOutId) ||
+        Boolean(event.errorSavedRunnerId && next.runners[event.errorSavedRunnerId]?.virtualOutId);
+      newOutIds = Array.from({ length: Math.max(0, Math.min(1, errorOuts) - (alreadyOut ? 1 : 0)) },
         (_, index) => `${event.eventId}:${index}`);
       next.lostOutIds.push(...newOutIds);
     }
@@ -172,6 +178,13 @@ export function accountRuns(current: RunAccounting, event: RunAccountingEvent): 
     next.atBat = null;
   }
   const remaining = new Set([...event.basesAfter, ...event.scored].filter((id): id is string => id !== null));
+  if (event.errorSavedRunnerId && event.misplay === 'error' && remaining.has(event.errorSavedRunnerId)) {
+    const runner = next.runners[event.errorSavedRunnerId];
+    if (!runner) throw new Error('No se pudo reconstruir al corredor que se salvó por el error.');
+    runner.extraLife = true;
+    runner.extraLifeForPitcher = true;
+    runner.virtualOutId ??= newOutIds[0] ?? null;
+  }
   if (event.misplay || event.unknownAdvance) {
     event.basesBefore.forEach((id, base) => {
       if (id && remaining.has(id) && event.basesAfter[base] !== id && next.runners[id]) {

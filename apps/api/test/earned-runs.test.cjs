@@ -44,15 +44,19 @@ function privateEngine() {
 }
 function officialEngine() {
   const service = new OfficialScoringService();
-  service.configureTournamentAuthorization({ tournamentId: 'tour', organizerId: 'org', scorekeeperIds: ['score'] });
+  service.nowIso = () => '2026-11-17T02:00:00.000Z';
+  service.configureTournamentAuthorization({ tournamentId: 'tour', organizerId: 'org', organizerIdentificationNumber: 'ORG0001',
+    scorekeeperIds: ['score'], scorekeeperIdentities: [{ actorId: 'score', identificationNumber: 'SCORE0001' }] });
   const initial = seed();
   for (const side of ['home', 'away']) {
     for (const p of initial.rosters[side]) service.registerGlobalPlayer({ actorId: 'org', player: { identificationNumber: p.id, displayName: p.name } });
     service.configureTournamentTeamRoster({
-      tournamentId: 'tour', organizerId: 'org', teamId: side, managerId: `mgr-${side}`, playerIdentificationNumbers: initial.rosters[side].map((p) => p.id)
+      tournamentId: 'tour', organizerId: 'org', teamId: side, managerId: `mgr-${side}`,
+      managerIdentificationNumber: `MANAGER${side}`, playerIdentificationNumbers: initial.rosters[side].map((p) => p.id)
     });
   }
   service.configureGameTeams({ gameId: 'game', tournamentId: 'tour', organizerId: 'org', homeTeamId: 'home', awayTeamId: 'away' });
+  service.configureGameAuthorization({ gameId: 'game', tournamentId: 'tour', organizerId: 'org', scorekeeperIds: ['score'] });
   for (const side of ['home', 'away']) {
     service.configureGameLineup({
       gameId: 'game', tournamentId: 'tour', teamId: side, managerId: `mgr-${side}`,
@@ -62,7 +66,11 @@ function officialEngine() {
   }
   const get = () => service.getOfficialState('game', 'tour');
   const submit = (extra) => service.submitOfficialUpdate({ gameId: 'game', tournamentId: 'tour', actorId: 'score', actorRole: 'scorekeeper', patch: {}, ...extra });
-  const event = (playEvent) => submit({ playEvent });
+  const event = (playEvent) => submit({ playEvent: {
+    ...(['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(playEvent.type) ?
+      { fielderIdentificationNumber: get().state.offenseTeamId === 'home' ? 'AWAY6' : 'HOME6' } : {}),
+    ...playEvent
+  } });
   const replace = (side = 'home') => {
     const sheet = service.getTeamSheets('game', 'tour', `mgr-${side}`, 'manager').sheets.find((s) => s.teamId === side);
     const response = service.requestPersonnelChange({
@@ -275,7 +283,7 @@ test('unidentified official run adjustments remain pending and manual scoreboard
 test('controller forwards error evidence and run reviews to the same official engine', () => {
   const e = officialEngine(), controller = new OfficialScoringController(e.service);
   const body = { tournamentId: 'tour', actorId: 'score', actorRole: 'scorekeeper', patch: {} };
-  controller.submitOfficialUpdate('game', { ...body, playEvent: { type: 'ERROR', errorOuts: 1 } });
+  controller.submitOfficialUpdate('game', { ...body, playEvent: { type: 'ERROR', errorOuts: 1, fielderIdentificationNumber: 'HOME6' } });
   e.play('homeRun');
   const run = e.runs[0];
   controller.submitOfficialUpdate('game', { ...body, runReview: { eventId: run.eventId, runnerId: run.runnerId, team: 'unearned', pitcher: 'unearned', note: 'Revisión del anotador.' } });

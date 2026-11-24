@@ -5,8 +5,8 @@ export default function DemoJerseyAssignments({ assignedPlayers = [] }: {
 }) {
   return <article className="managerCard">
     <h2>Camisetas de los 23 jugadores de prueba</h2>
-    <p>Números precargados para probar el demo. Se respetan tus números personalizados. Esta lista de consulta no inscribe jugadores ni los declara presentes.</p>
-    <table className="demoJerseyTable" aria-label="Camisetas asignadas a todos los jugadores ficticios">
+    <p>Se respetan tus números personalizados. Esta lista de consulta no inscribe jugadores ni los declara presentes.</p>
+    <table className="demoJerseyTable" aria-label="Camisetas asignadas a los jugadores">
       <thead><tr><th scope="col">Camiseta</th><th scope="col">Jugador</th><th scope="col">Cédula</th></tr></thead>
       <tbody>{getDemoJerseyAssignments(assignedPlayers).map((player) => <tr key={player.identificationNumber}>
         <th scope="row">#{player.jerseyNumber}</th>

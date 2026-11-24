@@ -5,7 +5,7 @@ const { OfficialScoringService } = require('../src/modules/live-scoring/official
 function setup() {
   const service = new OfficialScoringService();
   service.configureTournamentAuthorization({
-    tournamentId: 'tournament', organizerId: 'organizer', scorekeeperIds: []
+    tournamentId: 'tournament', organizerId: 'organizer', organizerIdentificationNumber: 'ORG0001', scorekeeperIds: []
   });
   for (const [teamId, managerId, prefix] of [
     ['home', 'manager', 'HOME'], ['away', 'rival', 'AWAY']
@@ -17,7 +17,8 @@ function setup() {
       });
     }
     service.configureTournamentTeamRoster({
-      tournamentId: 'tournament', organizerId: 'organizer', teamId, managerId, playerIdentificationNumbers: players
+      tournamentId: 'tournament', organizerId: 'organizer', teamId, managerId,
+      managerIdentificationNumber: `MANAGER${teamId}`, playerIdentificationNumbers: players
     });
   }
   for (const gameId of ['game', 'other-game']) {

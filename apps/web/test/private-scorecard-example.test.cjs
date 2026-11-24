@@ -3,6 +3,31 @@ const { test } = require('node:test');
 const { createPrivateScorecardExample } = require('../app/demo/[slug]/private-scorecard-example-data');
 const { applyPrivateCommand, readPrivateSave, replayPrivate, undoPrivateCommand } = require('../app/demo/[slug]/private-scorecard');
 
+test('recorded two-out selection preserves its ordered retirements across save and undo', () => {
+  const { scorecardPracticeCommands, privateInningSummary, privateStats } = require('@playsport/shared');
+  const { seed } = createPrivateScorecardExample(), commands = scorecardPracticeCommands(seed, 'selectionTwoOutsRecorded');
+  const state = replayPrivate(seed, commands), batter = seed.lineups.away[3].id;
+  assert.equal(state.outs, 2); assert.equal(state.bases[0], batter); assert.equal(privateStats(state, 'away', batter).hits, 0);
+  assert.deepEqual(state.log.at(-1).selectionOuts.map(out => out.base), [4, 3]);
+  assert.equal(privateInningSummary(state.log, batter)[0].code, 'FC·DP');
+  const saved = readPrivateSave(JSON.stringify({ version: 1, seed, commands }));
+  assert.deepEqual(replayPrivate(saved.seed, saved.commands), state);
+  assert.deepEqual(undoPrivateCommand(seed, commands).state, replayPrivate(seed, commands.slice(0, -1)));
+});
+
+test('selection error exercises are isolated and the recorded example shows two attributed errors without an extra hit', () => {
+  const { scorecardPracticeCommands, privateFieldingStats, privateInningSummary, privateStats } = require('@playsport/shared');
+  const { seed } = createPrivateScorecardExample(), baseline = structuredClone(seed);
+  const commands = scorecardPracticeCommands(seed, 'selectionErrorRecorded'), state = replayPrivate(seed, commands);
+  const runner = seed.lineups.away[0].id, batter = seed.lineups.away[1].id;
+  assert.deepEqual(state.bases, [null, batter, runner]); assert.equal(state.outs, 0);
+  assert.equal(privateFieldingStats(state, 'home').errors, 2);
+  assert.equal(privateStats(state, 'away', batter).hits, 0);
+  assert.ok(privateInningSummary(state.log, batter).some(entry => entry.code === 'FC+E'));
+  assert.equal(replayPrivate(seed, scorecardPracticeCommands(seed, 'selectionError')).log.length, 3);
+  assert.deepEqual(seed, baseline);
+});
+
 test('the example opens with complete unique lineups, jerseys and recorded offense', () => {
   const { seed, commands } = createPrivateScorecardExample();
   const state = replayPrivate(seed, commands);

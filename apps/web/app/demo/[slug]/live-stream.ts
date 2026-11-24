@@ -6,7 +6,7 @@ export function connectVisibleStream(url: string, configure: (source: globalThis
       source?.close();
       source = null;
     } else if (!source) {
-      source = new globalThis.EventSource(url);
+      source = new globalThis.EventSource(url, { withCredentials: true });
       configure(source);
     }
   };

@@ -4,6 +4,13 @@
     "slug": "playsport",
     "version": "0.1.0",
     "orientation": "portrait",
-    "assetBundlePatterns": ["**/*"]
+    "assetBundlePatterns": ["**/*"],
+    "plugins": [
+      ["expo-image-picker", {
+        "photosPermission": "Permite elegir una foto para tu perfil de PlaySport.",
+        "cameraPermission": false,
+        "microphonePermission": false
+      }]
+    ]
   }
 }

@@ -7,7 +7,7 @@ export const demoPlayers = Array.from({ length: 23 }, (_, index) => {
     : `PRUEBA${number}`;
   return {
     identificationNumber,
-    displayName: `${number <= 18 ? 'Jugador' : 'Suplente'} ficticio ${number}`,
+    displayName: `${number <= 18 ? 'Jugador' : 'Suplente'} ${number}`,
     jerseyNumber: String(number)
   };
 });

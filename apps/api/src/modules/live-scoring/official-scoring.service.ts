@@ -1,19 +1,47 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { RegistrationService, type RosterRulesContext } from './registration.service';
+import { isCalendarDate, isGameTime, isProfileLocation as isProfileLocationForPlan, type GameSuspension, type ManagerRosterTeam, type RosterPerson, type RosterRole } from '@playsport/shared';
 import type { PersonnelAction, PersonnelRequest, PresentOfficial, TeamSheetPlayer, TeamSheetsSnapshot } from '@playsport/shared';
+import { isPresentOfficialRole } from '@playsport/shared';
 import {
-  accountRuns, createRunAccounting, findDuplicateFieldPosition, lineupFieldPositions,
+  accountRuns, createRunAccounting, findDuplicateFieldPosition, lineupFieldPositions, lineupSizeError,
   reviewAccountedRun, runTotals, validRunEvidence, validRunReview,
-  applyPrivateCommand, isScorecardCommand, minimumDestinations,
+  applyPrivateCommand, assertScoringSubmission, declaredScoringRules, noAtBatResults, reachedOnErrorResults, isScorecardCommand, minimumDestinations, isOfficialGameDetails, isSoftballScorecard, placeSoftballTieBreakerRunner, softballTieBreakerNotice,
   type AccountedRun, type RunAccounting, type RunReview, type PrivateCommand,
-  type PrivateState, type PrivatePlayer, type PrivateLog, type PlayResult
+  type PrivateState, type PrivatePlayer, type PrivateLog, type PlayResult, type DefensiveError, type StrikeoutType,
+  type OfficialGameDetails, type OfficialGameSummary, type OfficialGamesSnapshot, type OfficialGameStatus, type GameProtest, type OfficialStandingGame
 } from '@playsport/shared';
 import { Observable, Subject } from 'rxjs';
+import { deserialize, serialize } from 'node:v8';
+import { createHash, randomUUID } from 'node:crypto';
+import { OfficialStateStore } from './official-state.store';
+import { supportsOfficialTournamentScoring, type TournamentDocument, type RosterMember, type InstitutionKind } from '@playsport/shared';
+import { scorecardStatistics, calculateStatisticsRates, createGameReport, managerTeamKey,
+  type ManagedTeam, type ManagerStatisticsPlayer, type GameFinalReview, type StatisticsGame, type StatisticsSnapshot } from '@playsport/shared';
+import type { CareerGame, CareerRole } from '@playsport/shared';
+import { changeGameClock, pauseGameClock, isGameClock, isGameClockAction, isTimedScoringCommand, startOrResumeGameClock, type GameClock } from '@playsport/shared';
+import { readScorekeeperSubstitutions, type ScorekeeperSubstitutionState } from '@playsport/shared';
+import type { OrganizerFreeReservation, OrganizerPlanRequest, OrganizerPlanAuthorization, OrganizerGameRestart } from '@playsport/shared';
+import { OrganizerCapacityState } from './organizer-capacity-state';
+
+type InstitutionalIdentity = {
+  kind: InstitutionKind; id: string; name: string; organizerId: string; managerId: string | null;
+  tournamentId: string; managerOwned: boolean; ownerAccountId?: string;
+};
+
+type TournamentPlanning = {
+  document: (id: string) => TournamentDocument | null;
+  assertParticipation: (tournamentId: string, gameId: string, teamId: string, players: string[], kind: 'roster' | 'lineup' | 'play') => void;
+  managerAccount?: (tournamentId: string, managerId: string, accountId: string) => boolean;
+  organizerAccount?: (tournamentId: string, accountId: string) => boolean;
+  published?: (tournamentId: string) => boolean;
+  institutions?: (includePrivate: boolean) => InstitutionalIdentity[];
+  organizerCapacity?: (tournamentId: string) => { accountId: string; legacy: boolean } | null;
+};
 
 type OfficialActorRole = 'organizer' | 'scorekeeper';
 
 type AppRole = 'fan' | 'player' | 'manager' | 'organizer' | 'scorekeeper' | 'scout';
-
-type OfficialGameStatus = 'scheduled' | 'in_progress' | 'final';
 
 type SubscriptionTier = 'free' | 'paid';
 
@@ -106,6 +134,7 @@ export type TournamentPlayerInput = {
 };
 
 type RegisteredPlayerRecord = {
+  privateRegistration?: boolean;
   displayName: string;
   identificationNumber: string;
   isMinor: boolean;
@@ -131,10 +160,15 @@ type TournamentAuthorizationRecord = {
   subscriptionTier: SubscriptionTier;
   authorizedScorekeepers: Set<string>;
   teamRosters: Map<string, TournamentTeamRosterRecord>;
+  officialIdentifications: Set<string>;
+  participantIdentifications: Set<string>;
   updatedAt: string;
 };
 
 type OfficialGameState = {
+  clock?: GameClock;
+  protest?: GameProtest;
+  suspension?: GameSuspension;
   inning: number;
   outs: number;
   balls: number;
@@ -223,6 +257,14 @@ type OfficialPlayEventRecord = {
   pitcherIdentificationNumber: string | null;
   runnerIdentificationNumber: string | null;
   fielderIdentificationNumber: string | null;
+  fielderPosition?: string;
+  strikeoutType?: StrikeoutType;
+  battedBallType?: PrivateLog['battedBallType'];
+  fieldingSequence?: number[];
+  caughtBy?: PrivateLog['caughtBy'];
+  infieldFly?: true;
+  batterRuleOut?: PrivateLog['batterRuleOut'];
+  ruleOut?: PrivateLog['ruleOut'];
   fromBase: number | null;
   toBase: number | null;
   runsScored: number;
@@ -251,6 +293,8 @@ type CompletedPlateAppearanceRecord = {
 };
 
 type PlayByPlayRecord = {
+  finalReview?: GameFinalReview;
+  tieBreakerRunner?: PrivateState['tieBreakerRunner'];
   scorecardLog: PrivateLog[];
   courtesyFor: Record<string, string>;
   sequence: number;
@@ -275,7 +319,17 @@ type FieldRepresentativeProjection = FieldRepresentativeRecord & {
 };
 
 type OfficialGameRecord = {
+  replacementPending?: boolean;
+  operationStartedAt?: string;
+  scorekeeperSubstitutions?: ScorekeeperSubstitutionState;
+  plannedProjectionSignature?: string;
+  plannedScorekeeperIds?: string[];
+  chatFinishedAt?: string | null;
+  hasStarted: boolean;
+  suspensionArchives: Array<{ suspension: GameSuspension; state: OfficialGameState; lineup: LineupProjection; playByPlay: PlayByPlayProjection }>;
+  scoringActors: Set<string>;
   regulationInnings?: 7 | 9;
+  softballTieBreakerFromInning?: number;
   scoringHistory: Array<{
     state: OfficialGameState;
     playByPlay: PlayByPlayRecord;
@@ -302,6 +356,7 @@ type OfficialGameRecord = {
   }>;
   personnelRequests: PersonnelRequest[];
   personnelVersion: number;
+  details: OfficialGameDetails | null;
   officialState: OfficialGameState;
   playByPlay: PlayByPlayRecord;
   events: OfficialScoringStreamPayload[];
@@ -371,6 +426,9 @@ type PlayByPlayProjection = {
     inning: number;
     defenseTeamId: string | null;
     fielderIdentificationNumber: string;
+    errorIndex: number;
+    position: string | null;
+    type: DefensiveError['type'] | null;
     description: string;
   }>;
   batterStats: Array<
@@ -454,7 +512,10 @@ export type TournamentAuthorizationCommand = {
   tournamentId: string;
   organizerId: string;
   scorekeeperIds: string[];
+  organizerIdentificationNumber?: string;
+  scorekeeperIdentities?: Array<{ actorId: string; identificationNumber: string }>;
   subscriptionTier?: SubscriptionTier;
+  rosterRules?: unknown;
 };
 
 export type TournamentSubscriptionCommand = {
@@ -479,6 +540,7 @@ export type TournamentTeamRosterCommand = {
   organizerId?: string;
   teamId: string;
   managerId: string;
+  managerIdentificationNumber?: string;
   playerIdentificationNumbers: string[];
 };
 
@@ -516,6 +578,7 @@ export type GameLineupCommand = {
 };
 
 export type OfficialUpdateCommand = {
+  clockAction?: unknown;
   gameId: string;
   tournamentId: string;
   actorId: string;
@@ -540,14 +603,402 @@ export type GamePermissionsInput = {
   role: AppRole;
 };
 
+function OfficialMutation<Args extends unknown[], Result>(
+  _target: OfficialScoringService, _name: string,
+  descriptor: TypedPropertyDescriptor<(..._args: Args) => Result>
+) {
+  const original = descriptor.value;
+  if (!original) throw new Error('Falta la operación deportiva transaccional.');
+  descriptor.value = function(this: OfficialScoringService, ...args: Args): Result {
+    return this.runOfficialMutation(() => original.apply(this, args));
+  };
+}
+
 @Injectable()
 export class OfficialScoringService {
+  private readonly organizerCapacity = new OrganizerCapacityState();
+  organizerFreeAccess(accountId: string) { return this.organizerCapacity.access(accountId); }
+  organizerGameUsage(tournamentId: string) { return this.organizerCapacity.usage(tournamentId); }
+  organizerPlan(tournamentId: string) { return this.organizerCapacity.plan(tournamentId); }
+  organizerPlanRevision(tournamentId: string) { return this.organizerCapacity.planRevision(tournamentId); }
+  organizerRestarts(tournamentId: string) { return this.organizerCapacity.restarts(tournamentId); }
+  @OfficialMutation
+  selectOrganizerPlan(input: OrganizerPlanRequest) { return this.organizerCapacity.select(input); }
+  @OfficialMutation
+  authorizeOrganizerPlan(input: OrganizerPlanAuthorization) { return this.organizerCapacity.authorize(input, this.nowIso()); }
+  @OfficialMutation
+  restartOrganizerGame(input: OrganizerGameRestart, organizerId: string) {
+    const tournament = this.getTournamentOrThrow(input.tournamentId), game = this.games.get(input.gameId);
+    if (tournament.organizerId !== organizerId) throw new ForbiddenException('Solo el organizador de este torneo puede anular el partido.');
+    if (!game || game.tournamentId !== input.tournamentId) throw new NotFoundException('El partido no pertenece al torneo.');
+    const key = `restart:${input.expectedAccountId}:${input.requestId}`;
+    const replay = this.organizerCapacity.replay(key, input);
+    if (replay !== undefined) return { appliedRevision: replay, replayed: true };
+    if (!['in_progress','suspended'].includes(game.officialState.status) || game.officialState.protest)
+      throw new ConflictException('Solo se anulan por fuerza mayor partidos en curso o suspendidos, nunca finalizados ni bajo protesta.');
+    this.assertProtestVersion(game, input.expectedOfficialVersion);
+    const previousAttempt = this.organizerCapacity.restarts(input.tournamentId).filter(row => row.gameId === input.gameId).at(-1);
+    this.games.delete(input.gameId);
+    const replacement = this.getOrCreateGame(input.gameId, input.tournamentId);
+    replacement.teams = game.teams; replacement.details = game.details; replacement.regulationInnings = game.regulationInnings;
+    replacement.replacementPending = true;
+    replacement.softballTieBreakerFromInning = (game.regulationInnings ?? 7) + 1;
+    replacement.hasGameScopedAuthorization = game.hasGameScopedAuthorization;
+    replacement.gameAuthorizedScorekeepers = new Set(game.gameAuthorizedScorekeepers);
+    replacement.plannedProjectionSignature = game.plannedProjectionSignature;
+    replacement.plannedScorekeeperIds = game.plannedScorekeeperIds ? [...game.plannedScorekeeperIds] : undefined;
+    if (game.scorekeeperSubstitutions) replacement.scorekeeperSubstitutions = { ...game.scorekeeperSubstitutions,
+      members: structuredClone(game.scorekeeperSubstitutions.members), audit: structuredClone(game.scorekeeperSubstitutions.audit), movements: [] };
+    replacement.officialState.officialVersion = game.officialState.officialVersion + 1;
+    replacement.personnelVersion = game.personnelVersion + 1;
+    replacement.officialState.updatedBy = { id: organizerId, role: 'organizer' };
+    this.organizerCapacity.recordRestart({ accountId: input.expectedAccountId, tournamentId: input.tournamentId, gameId: input.gameId,
+      organizerId, cancelledAttemptId: previousAttempt?.replacementAttemptId ?? randomUUID(), replacementAttemptId: randomUUID(),
+      at: this.nowIso(), reason: input.reason });
+    this.publishPersonnel(replacement, tournament); this.publishScoringAvailability();
+    this.organizerCapacity.record(key, input, replacement.officialState.officialVersion);
+    return { appliedRevision: replacement.officialState.officialVersion, replayed: false };
+  }
+  organizerGameOperationAllowed(tournamentId: string, gameId: string) {
+    const mode = this.tournamentPlanning?.organizerCapacity?.(tournamentId);
+    if (!mode || mode.legacy) return true;
+    const doc = this.tournamentPlanning?.document(tournamentId);
+    if (!doc) throw new ConflictException('Falta el plan para validar la capacidad de este torneo.');
+    return doc.fixtures.some(fixture => this.plannedGameId(tournamentId, fixture.id) === gameId && this.tieBreakerReady(doc, fixture.phaseId)) &&
+      this.organizerCapacity.allows(mode.accountId, doc, gameId);
+  }
+  private tieBreakerReady(doc: TournamentDocument, phaseId: string) {
+    const phase = doc.phases.find(phase => phase.id === phaseId);
+    if (phase?.purpose !== 'tie-breaker') return true;
+    const source = doc.phases.find(row => row.id === phase.sourcePhaseId);
+    const fixtures = doc.fixtures.filter(row => row.phaseId === source?.id);
+    return source?.status === 'finished' && fixtures.length > 0 &&
+      fixtures.every(fixture => this.games.get(this.plannedGameId(doc.id, fixture.id))?.officialState.status === 'final');
+  }
+  @OfficialMutation
+  reserveOrganizerFree(input: OrganizerFreeReservation) { return this.organizerCapacity.reserve(input); }
+  private tournamentPlanning?: TournamentPlanning;
+  setTournamentPlanning(planning: TournamentPlanning) { this.tournamentPlanning = planning; }
+  accountManagesTournament(tournamentId: string, managerId: string, accountId: string) {
+    return this.tournamentPlanning?.managerAccount?.(tournamentId, managerId, accountId) === true;
+  }
+  accountOrganizesTournament(tournamentId: string, accountId: string) {
+    return this.tournamentPlanning?.organizerAccount?.(tournamentId, accountId) === true;
+  }
+  actorAssignedTournament(tournamentId: string, actorId: string) {
+    return this.tournamentAuthorizations.get(tournamentId)?.authorizedScorekeepers.has(actorId) === true;
+  }
+  accountHasInscription(tournamentId: string, accountId: string, teamId?: string) {
+    return this.tournamentPlanning?.document(tournamentId)?.teams.some(team => team.enrollment && (!teamId || team.id === teamId) &&
+      this.accountManagesTournament(tournamentId, team.managerId, accountId)) === true;
+  }
+  hasManagedInscriptions(tournamentId: string) {
+    return this.tournamentPlanning?.document(tournamentId)?.teams.some(team => team.enrollment) === true;
+  }
+  assertPlannedRosterEditable(tournamentId: string, teamId: string) {
+    this.tournamentPlanning?.assertParticipation(tournamentId, '', teamId, [], 'roster');
+  }
+  plannedActors(doc: TournamentDocument, organizerId = 'org-demo') {
+    const pending = new Map<string, string>();
+    pending.set(organizerId, this.requireActorIdentity(organizerId));
+    for (const team of doc.teams) if (team.managerId)
+      pending.set(team.managerId, this.prepareActorIdentity(pending, team.managerId, team.managerIdentification || undefined));
+    for (const fixture of doc.fixtures) for (const actor of fixture.scorekeeperIds)
+      pending.set(actor, this.requireActorIdentity(actor));
+    return [...pending].map(([actorId, identification]) => ({ actorId, identification }));
+  }
+  @OfficialMutation
+  restorePlannedActors(rows: Array<{ actorId: string; identification: string }>) {
+    const pending = new Map<string, string>();
+    for (const row of rows) this.prepareActorIdentity(pending, row.actorId, row.identification);
+    this.commitActorIdentities(pending);
+  }
+  plannedGameId(tournamentId: string, fixtureId: string) { return `plan:${tournamentId}:${fixtureId}`; }
+  plannedFixtureAvailable(tournamentId: string, fixtureId: string) {
+    const game = this.games.get(this.plannedGameId(tournamentId, fixtureId));
+    return game?.tournamentId === tournamentId && Boolean(game.details);
+  }
+  plannedRoster(tournamentId: string, teamId: string): RosterMember[] {
+    const tournament = this.tournamentAuthorizations.get(tournamentId), roster = tournament?.teamRosters.get(teamId);
+    if (!roster) return [];
+    const direct = this.registration?.rosterMembers({ tournamentId, teamId, managerId: roster.managerId,
+      teamName: teamId, tournamentName: tournamentId }) ?? [];
+    const found = new Set(direct.map(member => member.person.id));
+    const approved: RosterMember[] = [...roster.playerIdentificationNumbers].flatMap(id => {
+      const person = this.registration?.rosterPerson(id) ?? this.lookupRosterPerson(id);
+      if (!person) throw new ConflictException('No se pudo resolver un integrante del roster.');
+      return found.has(person.id) ? [] : [{ person, role: 'PLAYER', approvalStatus: 'approved' }];
+    });
+    return [...approved, ...direct];
+  }
+  validatePlannedTournament(doc: TournamentDocument, previous?: TournamentDocument, organizerId = 'org-demo') {
+    for (const sanction of doc.sanctions) if (sanction.target === 'player') {
+      const person = this.registration?.rosterPerson(sanction.targetId) ?? this.lookupRosterPerson(sanction.targetId);
+      if (!person) throw new ConflictException('La sanción debe identificar a un jugador real del registro o roster.');
+      sanction.targetId = person.id;
+    }
+    const pending = new Map<string, string>();
+    const managerTeams = new Set<string>();
+    const participantIdentities = new Set<string>();
+    const officialIdentities = new Set<string>([this.requireActorIdentity(organizerId)]);
+    for (const fixture of doc.fixtures) for (const actor of fixture.scorekeeperIds) officialIdentities.add(this.requireActorIdentity(actor));
+    for (const team of doc.teams) {
+      if (team.managerId) {
+        const identity = this.prepareActorIdentity(pending, team.managerId, team.managerIdentification || undefined);
+        if (officialIdentities.has(identity)) throw new ConflictException('Una persona no puede ser manager y organizador o anotador del mismo torneo.');
+        if (participantIdentities.has(identity)) throw new ConflictException('La misma persona no puede dirigir dos equipos del torneo con cuentas distintas.');
+        participantIdentities.add(identity);
+        if (managerTeams.has(team.managerId)) throw new ConflictException('Un mismo manager no puede dirigir dos equipos en este torneo.');
+        managerTeams.add(team.managerId);
+      }
+      const different = this.institutionalIdentities().find(row => row.kind === 'team' && row.id === team.id && row.name !== row.id && row.name !== team.name);
+      if (different && !team.enrollment) throw new ConflictException(`El ID ${team.id} pertenece a ${different.name}. Conserva su identidad o usa un ID de equipo nuevo.`);
+      const old = previous?.teams.find(row => row.id === team.id);
+      if (old?.enrollment && old.name !== team.name && [...this.games.values()].some(game =>
+        game.tournamentId === doc.id && game.teams && [game.teams.homeTeamId, game.teams.awayTeamId].includes(team.id) &&
+        (game.officialState.officialVersion > 0 || game.teamSheets.size > 0 || game.lineups.size > 0)))
+        throw new ConflictException('El nombre de esta inscripción ya figura en un partido con alineación o anotación. No se reescribió su historial.');
+      if (old?.managerId && old.managerId !== team.managerId && this.tournamentAuthorizations.get(doc.id)?.teamRosters.has(team.id))
+        throw new ConflictException('Cambiar el manager requiere reasignar expresamente su identidad deportiva; no se reemplazó desde el plan.');
+    }
+    if (previous?.teams.some(team => !doc.teams.some(current => current.id === team.id)))
+      throw new ConflictException('Conserva los equipos inscritos. Usa Retirado para no borrar su historial.');
+    if (previous) for (const old of previous.fixtures) {
+      const game = this.games.get(this.plannedGameId(doc.id, old.id));
+      if (!game) continue;
+      const fixture = doc.fixtures.find(row => row.id === old.id);
+      if (!fixture) throw new ConflictException('No se puede borrar un encuentro publicado. Conserva su historial y gestiona su situación.');
+      if (game.officialState.officialVersion > 0 || game.teamSheets.size > 0 || game.lineups.size > 0) {
+        const protectedFields = game.replacementPending && !game.hasStarted && !game.teamSheets.size && !game.lineups.size ?
+          ['phaseId','homeTeamId','awayTeamId','round','series','scorekeeperIds'] as const :
+          ['phaseId','homeTeamId','awayTeamId','date','time','venueId','round','series','scorekeeperIds'] as const;
+        if (protectedFields.some(field => JSON.stringify(old[field]) !== JSON.stringify(fixture[field])))
+          throw new ConflictException('Este encuentro ya tiene alineaciones o anotación. Usa las herramientas oficiales de suspensión y reprogramación.');
+        const phase = previous.phases.find(row => row.id === old.phaseId), current = doc.phases.find(row => row.id === old.phaseId);
+        if (phase && current && ((phase.purpose ?? 'regular') !== (current.purpose ?? 'regular') ||
+            ['kind','turns','bestOf','pairing'].some(key => phase[key as keyof typeof phase] !== current[key as keyof typeof current])))
+          throw new ConflictException('La modalidad de una fase con encuentros iniciados no puede reescribirse. Crea una fase nueva.');
+      }
+    }
+    for (const fixture of doc.fixtures.filter(row => row.date && row.time)) {
+      const start = Date.parse(`${fixture.date}T${fixture.time}:00-04:00`);
+      const venue = doc.venues.find(row => row.id === fixture.venueId);
+      for (const game of this.games.values()) {
+        if (game.tournamentId === doc.id || !game.details || !game.teams || game.officialState.status === 'final') continue;
+        const other = Date.parse(`${game.details.date}T${game.details.time}:00-04:00`);
+        const otherPlan = this.tournamentPlanning?.document(game.tournamentId);
+        const otherFixture = otherPlan?.fixtures.find(row => this.plannedGameId(otherPlan.id, row.id) === game.gameId);
+        if (start >= other + (otherFixture?.durationMinutes ?? 120) * 60000 || other >= start + fixture.durationMinutes * 60000) continue;
+        if ([fixture.homeTeamId, fixture.awayTeamId].some(id => id && [game.teams?.homeTeamId, game.teams?.awayTeamId].includes(id)) ||
+            fixture.scorekeeperIds.some(id => game.gameAuthorizedScorekeepers.has(id)) ||
+            venue?.name === game.details.venue && venue.stateId === game.details.stateId && venue.municipalityId === game.details.municipalityId)
+          throw new ConflictException('El horario se superpone con otro partido oficial del equipo, sede o anotador. Revisa la cartelera.');
+      }
+    }
+    for (const fixture of doc.fixtures) for (const actor of fixture.scorekeeperIds) {
+      const identity = this.requireActorIdentity(actor), tournament = this.tournamentAuthorizations.get(doc.id);
+      if (tournament) this.assertRoleCompatible(tournament, identity, 'official');
+    }
+  }
+  @OfficialMutation
+  projectPlannedTournament(doc: TournamentDocument, published: boolean, organizerId = 'org-demo') {
+    if (!published && !doc.teams.some(team => team.enrollment)) return;
+    let tournament = this.tournamentAuthorizations.get(doc.id);
+    let changed = false;
+    const scorekeepers = [...new Set(doc.fixtures.flatMap(game => game.scorekeeperIds))];
+    if (!tournament) {
+      this.configureTournamentAuthorization({ tournamentId: doc.id, organizerId, scorekeeperIds: scorekeepers });
+      tournament = this.getTournamentOrThrow(doc.id);
+      changed = true;
+    } else {
+      if (tournament.organizerId !== organizerId) throw new ConflictException('La propiedad deportiva del torneo no coincide con su plan.');
+      changed = tournament.authorizedScorekeepers.size !== scorekeepers.length ||
+        scorekeepers.some(actor => !tournament!.authorizedScorekeepers.has(actor));
+      tournament.authorizedScorekeepers = new Set(scorekeepers);
+      for (const actor of [organizerId, ...scorekeepers]) tournament.officialIdentifications.add(this.requireActorIdentity(actor));
+    }
+    for (const team of doc.teams) {
+      if (!team.managerId || tournament.teamRosters.has(team.id)) continue;
+      const identities = new Map<string, string>();
+      const manager = this.prepareActorIdentity(identities, team.managerId, team.managerIdentification || undefined);
+      this.commitActorIdentities(identities);
+      tournament.participantIdentifications.add(manager);
+      tournament.teamRosters.set(team.id, { tournamentId: doc.id, teamId: team.id, managerId: team.managerId,
+        playerIdentificationNumbers: new Set<string>(), updatedAt: this.nowIso() });
+      changed = true;
+    }
+    if (!published || !supportsOfficialTournamentScoring(doc.sport)) return;
+    for (const fixture of doc.fixtures) {
+      if (!fixture.homeTeamId || !fixture.awayTeamId || !tournament.teamRosters.has(fixture.homeTeamId) || !tournament.teamRosters.has(fixture.awayTeamId)) continue;
+      const gameId = this.plannedGameId(doc.id, fixture.id), existing = this.games.get(gameId);
+      const signature = createHash('sha256').update(JSON.stringify([fixture, doc.name, doc.leagueName,
+        doc.teams.filter(team => [fixture.homeTeamId, fixture.awayTeamId].includes(team.id)).map(team => [team.id, team.name]),
+        doc.venues.find(venue => venue.id === fixture.venueId)])).digest('hex');
+      if (existing?.plannedProjectionSignature === signature) continue;
+      if (existing && (existing.officialState.officialVersion > 0 && !(existing.replacementPending && !existing.hasStarted) ||
+          existing.teamSheets.size > 0 || existing.lineups.size > 0)) continue;
+      const game = this.getOrCreateGame(gameId, doc.id);
+      game.plannedProjectionSignature = signature;
+      changed = true;
+      game.teams = { homeTeamId: fixture.homeTeamId, awayTeamId: fixture.awayTeamId };
+      if (!game.plannedScorekeeperIds ||
+          JSON.stringify(game.plannedScorekeeperIds) !== JSON.stringify(fixture.scorekeeperIds)) {
+        game.hasGameScopedAuthorization = true; game.gameAuthorizedScorekeepers = new Set(fixture.scorekeeperIds);
+      }
+      game.plannedScorekeeperIds = [...fixture.scorekeeperIds];
+      game.officialState.offenseTeamId = fixture.awayTeamId;
+      const venue = doc.venues.find(row => row.id === fixture.venueId);
+      game.details = fixture.date && fixture.time && venue && isProfileLocationForPlan(venue) ? {
+        tournamentName: doc.name || doc.leagueName, homeTeamName: doc.teams.find(team => team.id === fixture.homeTeamId)!.name,
+        awayTeamName: doc.teams.find(team => team.id === fixture.awayTeamId)!.name, date: fixture.date, time: fixture.time,
+        venue: venue.name, stateId: venue.stateId, municipalityId: venue.municipalityId
+      } : null;
+    }
+    if (changed) this.publishScoringAvailability();
+  }
   private readonly tournamentAuthorizations = new Map<string, TournamentAuthorizationRecord>();
   private readonly globalPlayersByIdentification = new Map<string, RegisteredPlayerRecord>();
   private readonly games = new Map<string, OfficialGameRecord>();
   private readonly streams = new Map<string, Subject<OfficialScoringStreamPayload>>();
   private readonly personnelStreams = new Map<string, Subject<void>>();
+  private readonly actorIdentifications = new Map<string, string>();
+  private readonly registration?: RegistrationService;
+  private readonly persistentStore?: OfficialStateStore;
+  private mutationDepth = 0;
+  private notifications: Array<() => void> = [];
 
+  constructor(@Optional() registration?: RegistrationService, @Optional() options?: { path: string }) {
+    this.registration = registration;
+    this.persistentStore = options ? new OfficialStateStore(options.path) : undefined;
+    try {
+      const saved = this.persistentStore?.load();
+      if (saved) this.restoreStoredState(saved);
+      if (saved && registration && this.persistentStore?.registration() === null)
+        throw new Error('Falta el registro deportivo de esta base. Restaura la copia; no se importó un registro antiguo.');
+      if (this.persistentStore) registration?.usePersistentStore(this.persistentStore);
+      this.refreshRegisteredMinors();
+    } catch (error) {
+      this.persistentStore?.close();
+      throw error;
+    }
+  }
+
+  onModuleDestroy() {
+    for (const stream of this.streams.values()) stream.complete();
+    for (const stream of this.personnelStreams.values()) stream.complete();
+    this.persistentStore?.close();
+  }
+
+  private storedState() {
+    return { games: this.games, tournamentAuthorizations: this.tournamentAuthorizations,
+      globalPlayersByIdentification: this.globalPlayersByIdentification, actorIdentifications: this.actorIdentifications,
+      organizerCapacity: this.organizerCapacity.export() };
+  }
+
+  private restoreStoredState(payload: Uint8Array) {
+    const value: unknown = deserialize(payload);
+    if (!value || typeof value !== 'object' ||
+        !('games' in value) || !(value.games instanceof Map) ||
+        !('tournamentAuthorizations' in value) || !(value.tournamentAuthorizations instanceof Map) ||
+        !('globalPlayersByIdentification' in value) || !(value.globalPlayersByIdentification instanceof Map) ||
+        !('actorIdentifications' in value) || !(value.actorIdentifications instanceof Map)) {
+      throw new Error('El estado deportivo no tiene el formato esperado. No se inició un marcador vacío.');
+    }
+    for (const [id, game] of value.games) {
+      if (typeof id !== 'string' || !game || game.gameId !== id || typeof game.tournamentId !== 'string' ||
+          !game.officialState || !Number.isSafeInteger(game.officialState.officialVersion) ||
+          game.replacementPending !== undefined && typeof game.replacementPending !== 'boolean' ||
+          game.operationStartedAt !== undefined && (typeof game.operationStartedAt !== 'string' ||
+            !Number.isFinite(Date.parse(game.operationStartedAt))) ||
+          game.officialState.clock !== undefined && !isGameClock(game.officialState.clock) ||
+          game.softballTieBreakerFromInning !== undefined &&
+            (!Number.isSafeInteger(game.softballTieBreakerFromInning) || game.softballTieBreakerFromInning < 8) ||
+          !(game.lineups instanceof Map) || !(game.teamSheets instanceof Map) ||
+          !(game.scoringActors instanceof Set) || !Array.isArray(game.scoringHistory) || !game.playByPlay)
+        throw new Error('Un partido persistente no es válido. No se sobrescribió.');
+      if (game.scorekeeperSubstitutions !== undefined)
+        readScorekeeperSubstitutions({ ...game.scorekeeperSubstitutions, accountId: 'stored', tournamentId: game.tournamentId, gameId: id },
+          'stored', game.tournamentId, id);
+    }
+    for (const [id, tournament] of value.tournamentAuthorizations) {
+      if (typeof id !== 'string' || !tournament || tournament.tournamentId !== id ||
+          typeof tournament.organizerId !== 'string' || !(tournament.teamRosters instanceof Map) ||
+          !(tournament.authorizedScorekeepers instanceof Set))
+        throw new Error('Una autorización deportiva persistente no es válida.');
+    }
+    for (const [actor, identity] of value.actorIdentifications)
+      if (typeof actor !== 'string' || typeof identity !== 'string') throw new Error('Una identidad deportiva guardada no es válida.');
+    if ('organizerCapacity' in value) this.organizerCapacity.restore(value.organizerCapacity);
+    this.games.clear();
+    for (const [key, game] of value.games) {
+      game.softballTieBreakerFromInning ??= Math.max((game.regulationInnings ?? 7) + 1, game.officialState.inning + 1);
+      this.games.set(key, game);
+    }
+    this.tournamentAuthorizations.clear(); for (const [key, tournament] of value.tournamentAuthorizations) this.tournamentAuthorizations.set(key, tournament);
+    this.globalPlayersByIdentification.clear(); for (const [key, player] of value.globalPlayersByIdentification) this.globalPlayersByIdentification.set(key, player);
+    this.actorIdentifications.clear(); for (const [key, identity] of value.actorIdentifications) this.actorIdentifications.set(key, identity);
+  }
+
+  runOfficialMutation<T>(work: () => T): T {
+    if (!this.persistentStore || this.mutationDepth) return work();
+    const before = serialize(this.storedState());
+    this.mutationDepth++;
+    let result: T;
+    try {
+      result = this.persistentStore.transaction(() => {
+        const answer = work();
+        this.persistentStore!.save(serialize(this.storedState()));
+        return answer;
+      });
+    } catch (error) {
+      this.restoreStoredState(before);
+      this.notifications = [];
+      throw error;
+    } finally {
+      this.mutationDepth--;
+    }
+    const notifications = this.notifications;
+    this.notifications = [];
+    for (const notify of notifications) notify();
+    return result;
+  }
+
+  private emitGameEvent(gameId: string, event: OfficialScoringStreamPayload) {
+    const notify = () => this.getOrCreateStream(gameId).next(event);
+    if (this.mutationDepth) this.notifications.push(notify);
+    else notify();
+  }
+
+  private emitPersonnel(gameId: string) {
+    const notify = () => this.personnelStreams.get(gameId)?.next();
+    if (this.mutationDepth) this.notifications.push(notify);
+    else notify();
+  }
+
+  @OfficialMutation
+  refreshRegisteredMinors() {
+    for (const minor of this.registration?.players() ?? []) {
+      if (!this.globalPlayersByIdentification.has(minor.id)) {
+        const now = this.nowIso();
+        this.globalPlayersByIdentification.set(minor.id, {
+          privateRegistration: true, displayName: minor.fullName, identificationNumber: minor.id,
+          isMinor: true, representativeIdentificationNumber: null, extraProfile: {},
+          createdAt: now, updatedAt: now, createdById: minor.representativeId
+        });
+      }
+    }
+  }
+
+  hasExistingPlayerIdentity(identification: string) {
+    const key = identification.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const player = this.globalPlayersByIdentification.get(key);
+    return Boolean(player && !player.privateRegistration) ||
+      Array.from(this.actorIdentifications.values()).includes(key) ||
+      Array.from(this.tournamentAuthorizations.values()).some(tournament =>
+        tournament.officialIdentifications.has(key) || tournament.participantIdentifications.has(key));
+  }
+
+  @OfficialMutation
   configureTournamentAuthorization(command: TournamentAuthorizationCommand) {
     const tournamentId = this.requireText(command.tournamentId, 'tournamentId');
     const organizerId = this.requireText(command.organizerId, 'organizerId');
@@ -556,6 +1007,18 @@ export class OfficialScoringService {
     const existing = this.tournamentAuthorizations.get(tournamentId);
     if (existing && existing.organizerId !== organizerId) {
       throw new ForbiddenException('Solo el organizador oficial del torneo puede actualizar autorizaciones.');
+    }
+    if (existing) this.refreshDirectRosterMembers(existing);
+    const identities = new Map<string, string>();
+    const organizerIdentification = this.prepareActorIdentity(identities, organizerId, command.organizerIdentificationNumber);
+    const suppliedScorekeepers = this.scorekeeperIdentityInputs(command.scorekeeperIdentities, scorekeeperIds);
+    const officialIdentifications = new Set(existing?.officialIdentifications ?? []);
+    for (const identificationNumber of [
+      organizerIdentification,
+      ...scorekeeperIds.map((id) => this.prepareActorIdentity(identities, id, suppliedScorekeepers.get(id)))
+    ]) {
+      if (existing) this.assertRoleCompatible(existing, identificationNumber, 'official');
+      officialIdentifications.add(identificationNumber);
     }
 
     const subscriptionTier = command.subscriptionTier
@@ -569,13 +1032,24 @@ export class OfficialScoringService {
       courtesyRunnerSource: existing?.courtesyRunnerSource ?? 'BENCH',
       authorizedScorekeepers: new Set(scorekeeperIds),
       teamRosters: existing?.teamRosters ?? new Map<string, TournamentTeamRosterRecord>(),
+      officialIdentifications,
+      participantIdentifications: existing?.participantIdentifications ?? new Set<string>(),
       updatedAt: this.nowIso()
     };
 
+    if (command.rosterRules !== undefined) {
+      if (existing) throw new BadRequestException('Modifica las reglas del roster en su panel, confirmando la revisión vigente.');
+      if (!this.registration) throw new ConflictException('El registro persistente no está disponible para guardar las reglas.');
+      this.registration.saveRosterRules({ tournamentId, organizerId, tournamentName: tournamentId, games: [], teamIds: [], members: {} },
+        command.rosterRules, 0, false);
+    }
+    this.commitActorIdentities(identities);
     this.tournamentAuthorizations.set(tournamentId, nextRecord);
+    if (existing) this.publishScoringAvailability();
     return this.serializeTournamentAuthorization(nextRecord);
   }
 
+  @OfficialMutation
   configureTournamentSubscription(command: TournamentSubscriptionCommand) {
     const tournamentId = this.requireText(command.tournamentId, 'tournamentId');
     const organizerId = this.requireText(command.organizerId, 'organizerId');
@@ -597,6 +1071,7 @@ export class OfficialScoringService {
     return this.serializeTournamentAuthorization(tournament);
   }
 
+  @OfficialMutation
   configureTournamentRules(command: {
     tournamentId: string;
     organizerId: string;
@@ -615,6 +1090,7 @@ export class OfficialScoringService {
     return this.serializeTournamentAuthorization(tournament);
   }
 
+  @OfficialMutation
   registerGlobalPlayer(command: RegisterGlobalPlayerCommand) {
     const actorId = this.requireText(command.actorId, 'actorId');
     const displayName = this.requireText(command.player.displayName, 'displayName');
@@ -630,6 +1106,9 @@ export class OfficialScoringService {
     }
 
     const isMinor = Boolean(command.player.isMinor);
+    if (isMinor) {
+      throw new BadRequestException('Los menores deben inscribirse desde el registro familiar, con su representante y un identificador permanente.');
+    }
     const representativeFromInput = command.player.representativeIdentificationNumber
       ? this.normalizeIdentificationNumber(
           command.player.representativeIdentificationNumber,
@@ -637,9 +1116,7 @@ export class OfficialScoringService {
         )
       : null;
 
-    const representativeIdentificationNumber = isMinor
-      ? representativeFromInput ?? identificationNumber
-      : representativeFromInput;
+    const representativeIdentificationNumber = representativeFromInput;
 
     const now = this.nowIso();
     const record: RegisteredPlayerRecord = {
@@ -692,6 +1169,7 @@ export class OfficialScoringService {
     };
   }
 
+  @OfficialMutation
   registerTournamentPlayer(command: RegisterTournamentPlayerCommand) {
     const tournamentId = this.requireText(command.tournamentId, 'tournamentId');
     const organizerId = this.requireText(command.organizerId, 'organizerId');
@@ -700,6 +1178,8 @@ export class OfficialScoringService {
     if (tournament.organizerId !== organizerId) {
       throw new ForbiddenException('Solo el organizador oficial puede registrar jugadores desde este endpoint.');
     }
+    const participantIdentification = this.normalizeIdentificationNumber(command.player.identificationNumber, 'identificationNumber');
+    this.assertRoleCompatible(tournament, participantIdentification, 'participant');
 
     const registration = this.registerGlobalPlayer({
       actorId: organizerId,
@@ -716,6 +1196,7 @@ export class OfficialScoringService {
     if (!stored) {
       throw new NotFoundException('No se pudo recuperar el jugador recien registrado.');
     }
+    tournament.participantIdentifications.add(participantIdentification);
 
     return {
       tournamentId,
@@ -744,6 +1225,7 @@ export class OfficialScoringService {
     };
   }
 
+  @OfficialMutation
   configureTournamentTeamRoster(command: TournamentTeamRosterCommand) {
     const tournamentId = this.requireText(command.tournamentId, 'tournamentId');
     const teamId = this.requireText(command.teamId, 'teamId');
@@ -761,9 +1243,14 @@ export class OfficialScoringService {
     const tournament = this.getTournamentOrThrow(tournamentId);
     const isOrganizerOverride = organizerId !== null && organizerId === tournament.organizerId;
     if (!isOrganizerOverride) {
-      throw new ForbiddenException('Solo el organizador puede aprobar o modificar el roster oficial.');
+      throw new ForbiddenException('Solo el organizador puede reemplazar la configuración oficial; el manager incorpora desde ROSTER.');
     }
     const existingRoster = tournament.teamRosters.get(teamId);
+    const identities = new Map<string, string>();
+    const managerIdentification = this.prepareActorIdentity(identities, managerId, command.managerIdentificationNumber);
+    for (const identification of [managerIdentification, ...playerIdentificationNumbers]) {
+      this.assertRoleCompatible(tournament, identification, 'participant');
+    }
 
     if (existingRoster && existingRoster.managerId !== managerId && !isOrganizerOverride) {
       throw new ForbiddenException(
@@ -771,7 +1258,7 @@ export class OfficialScoringService {
       );
     }
 
-    this.assertManagerSingleTeamPerTournament(tournament, teamId, managerId);
+    this.assertManagerSingleTeamPerTournament(tournament, teamId, managerId, managerIdentification);
 
     for (const identificationNumber of playerIdentificationNumbers) {
       if (!this.globalPlayersByIdentification.has(identificationNumber)) {
@@ -797,6 +1284,16 @@ export class OfficialScoringService {
       updatedAt: this.nowIso()
     };
 
+    this.registration?.configureOfficialRoster(this.rosterRulesContext(tournamentId), teamId,
+      playerIdentificationNumbers.map(id => {
+        const person = this.registration?.rosterPerson(id) ?? this.lookupRosterPerson(id);
+        if (!person) throw new ConflictException('No se pudo resolver un integrante del roster.');
+        return { person, role: 'PLAYER' as const, approvalStatus: 'approved' as const };
+      }));
+    this.commitActorIdentities(identities);
+    for (const identification of [managerIdentification, ...playerIdentificationNumbers]) {
+      tournament.participantIdentifications.add(identification);
+    }
     tournament.teamRosters.set(teamId, roster);
     tournament.updatedAt = roster.updatedAt;
     for (const game of this.games.values()) {
@@ -804,7 +1301,7 @@ export class OfficialScoringService {
       const representative = game.fieldRepresentatives.get(teamId);
       if (
         representative &&
-        (!roster.playerIdentificationNumbers.has(representative.identificationNumber) ||
+        (!this.matchRosterPerson(tournament, teamId, representative.identificationNumber) ||
           roster.managerId !== representative.authorizedByManagerId)
       ) {
         game.fieldRepresentatives.delete(teamId);
@@ -872,6 +1369,7 @@ export class OfficialScoringService {
     };
   }
 
+  @OfficialMutation
   configureGameAuthorization(command: GameAuthorizationCommand) {
     const gameId = this.requireText(command.gameId, 'gameId');
     const tournamentId = this.requireText(command.tournamentId, 'tournamentId');
@@ -889,11 +1387,13 @@ export class OfficialScoringService {
           `El anotador ${scorekeeperId} no esta autorizado a nivel torneo para ${tournamentId}.`
         );
       }
+      this.assertRoleCompatible(tournament, this.requireActorIdentity(scorekeeperId), 'official');
     }
 
     const game = this.getOrCreateGame(gameId, tournamentId);
     game.hasGameScopedAuthorization = true;
     game.gameAuthorizedScorekeepers = new Set(scorekeeperIds);
+    this.publishScoringAvailability();
 
     const authorization = this.serializeGameAuthorization(game, tournament);
     const event: OfficialScoringAuthorizationUpdatedEvent = {
@@ -905,7 +1405,7 @@ export class OfficialScoringService {
     };
 
     game.events.push(event);
-    this.getOrCreateStream(gameId).next(event);
+    this.emitGameEvent(gameId, event);
 
     return authorization;
   }
@@ -917,6 +1417,678 @@ export class OfficialScoringService {
     return this.serializeGameAuthorization(game, tournament);
   }
 
+  listManagerRosterTeams(managerIdRaw: string): ManagerRosterTeam[] {
+    const managerId = this.requireText(managerIdRaw, 'managerId');
+    const teams: ManagerRosterTeam[] = [];
+    for (const tournament of this.tournamentAuthorizations.values()) for (const roster of tournament.teamRosters.values()) {
+      if (roster.managerId !== managerId) continue;
+      const game = Array.from(this.games.values()).find(item => item.tournamentId === tournament.tournamentId &&
+        item.teams && [item.teams.homeTeamId, item.teams.awayTeamId].includes(roster.teamId) && item.details);
+      teams.push({ tournamentId: tournament.tournamentId, teamId: roster.teamId, managerId,
+        tournamentName: this.tournamentPlanning?.document(tournament.tournamentId)?.name || this.tournamentPlanning?.document(tournament.tournamentId)?.leagueName || game?.details?.tournamentName || tournament.tournamentId,
+        teamName: this.tournamentPlanning?.document(tournament.tournamentId)?.teams.find(team => team.id === roster.teamId)?.name ??
+          (game?.teams?.homeTeamId === roster.teamId ? game.details?.homeTeamName ?? roster.teamId : game?.details?.awayTeamName ?? roster.teamId) });
+    }
+    return teams;
+  }
+
+  private sportingTournament(tournament: TournamentAuthorizationRecord): SportsTournament {
+    const doc = this.tournamentPlanning?.document(tournament.tournamentId);
+    const games = Array.from(this.games.values()).filter(game => game.tournamentId === tournament.tournamentId);
+    return {
+      id: tournament.tournamentId,
+      name: doc?.name || doc?.leagueName || games.find(game => game.details)?.details?.tournamentName || tournament.tournamentId,
+      leagueId: doc?.leagueId ?? '', leagueName: doc?.leagueName ?? '',
+      location: doc && isProfileLocation(doc.location) ? { stateId: doc.location.stateId, municipalityId: doc.location.municipalityId } : null,
+      teams: Array.from(tournament.teamRosters.keys()).flatMap(id => {
+        const planned = doc?.teams.find(team => team.id === id);
+        if (planned?.status === 'withdrawn') return [];
+        const game = games.find(item => item.teams && [item.teams.homeTeamId, item.teams.awayTeamId].includes(id) && item.details);
+        return [{ id, name: planned?.name ??
+          (game?.teams?.homeTeamId === id ? game.details?.homeTeamName : game?.details?.awayTeamName) ?? id }];
+      })
+    };
+  }
+
+  listManagerSportsTeams(managerIdRaw: string, accountId: string): PlayerTeamMembership[] {
+    return this.listManagerRosterTeams(managerIdRaw).flatMap(team => {
+      const tournament = this.tournamentAuthorizations.get(team.tournamentId);
+      if (!tournament) throw new ConflictException('El equipo asignado no tiene su torneo registrado.');
+      const doc = this.tournamentPlanning?.document(team.tournamentId);
+      const planned = doc?.teams.find(item => item.id === team.teamId);
+      if (doc && !planned || planned?.status === 'withdrawn' || planned?.enrollment &&
+          !this.accountManagesTournament(team.tournamentId, managerIdRaw, accountId)) return [];
+      const competition = this.sportingTournament(tournament);
+      return [{ tournamentId: competition.id, tournamentName: competition.name, teamId: team.teamId, teamName: team.teamName,
+        leagueId: competition.leagueId, leagueName: competition.leagueName, location: competition.location }];
+    });
+  }
+
+  publicSportsTournaments(): { tournaments: SportsTournament[] } {
+    return { tournaments: Array.from(this.tournamentAuthorizations.values())
+      .filter(tournament => !this.tournamentPlanning?.document(tournament.tournamentId) ||
+        this.tournamentPlanning.published?.(tournament.tournamentId) === true)
+      .map(tournament => this.sportingTournament(tournament)) };
+  }
+
+  listPlayerTeams(identification: string): PlayerTeamMembership[] {
+    const key = this.normalizeIdentificationNumber(identification, 'identificación del jugador');
+    const teams: PlayerTeamMembership[] = [];
+    for (const tournament of this.tournamentAuthorizations.values()) {
+      const doc = this.tournamentPlanning?.document(tournament.tournamentId);
+      const direct = this.registration?.rosterPersonnel(tournament.tournamentId) ?? [];
+      const context = this.sportingTournament(tournament);
+      for (const roster of tournament.teamRosters.values()) {
+        const planned = doc?.teams.find(team => team.id === roster.teamId);
+        if (planned && (planned.status !== 'accepted' || planned.rosterStatus !== 'approved')) continue;
+        const member = direct.some(row => row.teamId === roster.teamId && row.role === 'PLAYER' && this.rosterPersonKey(row.person) === key);
+        const legacy = !planned?.enrollment && roster.playerIdentificationNumbers.has(key) &&
+          !this.globalPlayersByIdentification.get(key)?.privateRegistration;
+        if (!member && !legacy) continue;
+        const team = context.teams.find(item => item.id === roster.teamId);
+        if (!team) continue;
+        teams.push({ tournamentId: context.id, tournamentName: context.name, teamId: team.id, teamName: team.name,
+          leagueId: context.leagueId, leagueName: context.leagueName, location: context.location });
+      }
+    }
+    return teams;
+  }
+
+  managerPlanTeams(managerId: string, accountId: string): ManagedTeam[] {
+    const teams = new Map<string, ManagedTeam>();
+    for (const team of this.listManagerRosterTeams(managerId)) {
+      const doc = this.tournamentPlanning?.document(team.tournamentId);
+      const planned = doc?.teams.find(item => item.id === team.teamId);
+      if (planned?.enrollment && !this.accountManagesTournament(team.tournamentId, managerId, accountId)) continue;
+      const active = (!doc || !['finished', 'cancelled'].includes(doc.status)) &&
+        (!doc || planned?.managerId === managerId && planned.status !== 'withdrawn');
+      teams.set(managerTeamKey(team), { tournamentId: team.tournamentId, tournamentName: team.tournamentName,
+        teamId: team.teamId, teamName: team.teamName, active });
+    }
+    for (const game of this.games.values()) {
+      if (!game.teams) continue;
+      const doc = this.tournamentPlanning?.document(game.tournamentId);
+      for (const side of ['home', 'away'] as const) {
+        const teamId = side === 'home' ? game.teams.homeTeamId : game.teams.awayTeamId;
+        const manager = game.teamSheets.get(teamId)?.managerId ?? game.lineups.get(teamId)?.managerId;
+        const key = managerTeamKey({ tournamentId: game.tournamentId, teamId });
+        if (manager !== managerId || teams.has(key)) continue;
+        teams.set(key, { tournamentId: game.tournamentId,
+          tournamentName: doc?.name || game.details?.tournamentName || game.tournamentId, teamId,
+          teamName: (side === 'home' ? game.details?.homeTeamName : game.details?.awayTeamName) ??
+            doc?.teams.find(team => team.id === teamId)?.name ?? teamId, active: false });
+      }
+    }
+    return [...teams.values()];
+  }
+  managerStatistics(managerId: string) {
+    const players: ManagerStatisticsPlayer[] = [];
+    return { games: this.personalStatistics(null, managerId, 'team', players), players };
+  }
+  scorekeeperTournaments(actorId: string) {
+    return [...this.tournamentAuthorizations.values()].filter(tournament => tournament.authorizedScorekeepers.has(actorId)).map(tournament => {
+      const doc = this.tournamentPlanning?.document(tournament.tournamentId);
+      return { tournamentId: tournament.tournamentId, tournamentName: doc?.name ??
+        [...this.games.values()].find(game => game.tournamentId === tournament.tournamentId)?.details?.tournamentName ?? tournament.tournamentId,
+        active: !doc || !['finished', 'cancelled'].includes(doc.status) };
+    });
+  }
+  scorekeeperGameAssigned(actorId: string, tournamentId: string, gameId: string) {
+    const game = this.games.get(gameId), tournament = this.tournamentAuthorizations.get(tournamentId);
+    return Boolean(game && tournament && game.tournamentId === tournamentId && this.canWriteOfficial(game, tournament, actorId, 'scorekeeper'));
+  }
+  gameOperationStartedAt(tournamentId: string, gameId: string) {
+    const game = this.games.get(gameId);
+    return game?.tournamentId === tournamentId && game.officialState.status === 'in_progress' ?
+      game.operationStartedAt ?? game.officialState.updatedAt : null;
+  }
+  isScorekeeperSubstitute(actorId: string, tournamentId: string, gameId: string) {
+    const game = this.games.get(gameId);
+    return Boolean(game?.tournamentId === tournamentId &&
+      game.scorekeeperSubstitutions?.members.some(member => member.actorId === actorId && member.status === 'granted'));
+  }
+  scorekeeperSubstituteGames(actorId: string) {
+    return [...this.games.values()].filter(game => this.isScorekeeperSubstitute(actorId, game.tournamentId, game.gameId)).map(game => ({
+      tournamentId: game.tournamentId, gameId: game.gameId,
+      tournamentName: this.tournamentPlanning?.document(game.tournamentId)?.name ?? game.details?.tournamentName ?? game.tournamentId
+    }));
+  }
+  scorekeeperTournamentActive(tournamentId: string) {
+    const doc = this.tournamentPlanning?.document(tournamentId);
+    return !doc || !['finished', 'cancelled'].includes(doc.status);
+  }
+  scorekeeperSubstitutions(organizerId: string, tournamentId: string, gameId: string): ScorekeeperSubstitutionState {
+    const tournament = this.getTournamentOrThrow(tournamentId), game = this.games.get(gameId);
+    if (tournament.organizerId !== organizerId) throw new ForbiddenException('Solo el organizador de este torneo puede autorizar suplencias.');
+    if (!game || game.tournamentId !== tournamentId) throw new ForbiddenException('El partido no pertenece a este torneo.');
+    return structuredClone(game.scorekeeperSubstitutions ?? { revision: 0, members: [], audit: [] });
+  }
+  @OfficialMutation
+  changeScorekeeperSubstitution(command: {
+    organizerId: string; tournamentId: string; gameId: string; expectedRevision: number; action: 'grant' | 'revoke';
+    substituteActorId: string; name?: string; identification?: string; reason: string;
+  }) {
+    const state = this.scorekeeperSubstitutions(command.organizerId, command.tournamentId, command.gameId);
+    if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0 || command.expectedRevision >= Number.MAX_SAFE_INTEGER ||
+        !['grant', 'revoke'].includes(command.action) || !command.substituteActorId.startsWith('person:') ||
+        typeof command.reason !== 'string' || !command.reason.trim() || command.reason.length > 500)
+      throw new BadRequestException('Completa el suplente, la revisión y el motivo de la autorización.');
+    if (state.revision !== command.expectedRevision) throw new ConflictException('Las suplencias cambiaron en otro dispositivo. Actualiza antes de guardar.');
+    const tournament = this.getTournamentOrThrow(command.tournamentId), game = this.games.get(command.gameId)!;
+    let member = state.members.find(row => row.actorId === command.substituteActorId);
+    if (command.action === 'grant') {
+      if (!this.scorekeeperTournamentActive(command.tournamentId) || !['scheduled', 'in_progress'].includes(game.officialState.status))
+        throw new ConflictException('Solo puedes autorizar suplencias de partidos pendientes o en curso de un torneo activo.');
+      if (!command.identification || !command.name?.trim()) throw new BadRequestException('El suplente requiere una cuenta con identidad verificada.');
+      if (command.organizerId === command.substituteActorId) throw new ConflictException('El organizador ya tiene su propio permiso oficial; no puede suplirse a sí mismo.');
+      const identities = new Map<string, string>();
+      const identity = this.prepareActorIdentity(identities, command.substituteActorId, command.identification);
+      this.assertRoleCompatible(tournament, identity, 'official');
+      this.commitActorIdentities(identities);
+      tournament.officialIdentifications.add(identity);
+      if (!member) { member = { actorId: command.substituteActorId, name: command.name.trim(), status: 'granted' }; state.members.push(member); }
+      else { member.name = command.name.trim(); member.status = 'granted'; }
+    } else {
+      if (!member) throw new BadRequestException('Este usuario no tiene una suplencia registrada en el partido.');
+      member.status = 'revoked';
+    }
+    state.revision++;
+    state.audit.push({ revision: state.revision, actorId: command.substituteActorId, organizerId: command.organizerId,
+      action: command.action, reason: command.reason.trim(), at: this.nowIso() });
+    game.scorekeeperSubstitutions = state;
+    this.publishScoringAvailability();
+    return structuredClone(state);
+  }
+  scorekeeperStatistics(actorId: string, tournamentId: string, gameId?: string) {
+    if (!this.actorAssignedTournament(tournamentId, actorId) && !(gameId && this.isScorekeeperSubstitute(actorId, tournamentId, gameId)))
+      throw new ForbiddenException('No tienes este torneo o partido asignado como Anotador.');
+    if (gameId && this.games.get(gameId)?.tournamentId !== tournamentId) throw new ForbiddenException('Este partido no pertenece al torneo autorizado.');
+    const players: ManagerStatisticsPlayer[] = [];
+    return { games: this.personalStatistics(null, actorId, 'team', players, { tournamentId, gameId }), players };
+  }
+  personalStatistics(identification: string | null, managerId: string | null, mode: StatisticsSnapshot['mode'],
+    players?: ManagerStatisticsPlayer[], scope?: { tournamentId: string; gameId?: string }): StatisticsGame[] {
+    const person = identification === null ? null : this.normalizeIdentificationNumber(identification, 'identificación del jugador');
+    const publicIds = new Set(this.publicSportsTournaments().tournaments.map(tournament => tournament.id));
+    const rows: StatisticsGame[] = [];
+    for (const game of this.games.values()) {
+      if (!game.teams) continue;
+      if (scope && (game.tournamentId !== scope.tournamentId || scope.gameId && game.gameId !== scope.gameId)) continue;
+      const doc = this.tournamentPlanning?.document(game.tournamentId);
+      const normalizedSport = doc?.sport.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      const sport = normalizedSport === 'baseball' || normalizedSport === 'beisbol' ? 'baseball' :
+        normalizedSport === 'softball' || normalizedSport === 'softbol' ? 'softball' : null;
+      if (doc && sport === null) continue;
+      const rule = doc?.customRules.find(item => item.name.trim().toLowerCase() === 'base del pcl');
+      const eraBase = rule ? rule.value.trim() === '7' ? 7 : 9 : sport === 'baseball' ? 9 : sport === 'softball' ? 7 : null;
+      const state = this.serializeScorecard(game, this.getTournamentOrThrow(game.tournamentId));
+      for (const side of ['home', 'away'] as const) {
+        const teamId = side === 'home' ? game.teams.homeTeamId : game.teams.awayTeamId;
+        const initial = game.teamSheets.get(teamId)?.initialLineup ?? [];
+        const positions = this.gameParticipantPositions(game, state, teamId, side);
+        const manager = game.teamSheets.get(teamId)?.managerId ?? game.lineups.get(teamId)?.managerId;
+        if (!scope && (mode === 'player' ? person === null || !positions.has(person) : managerId === null || manager !== managerId)) continue;
+        if (rule && !['7', '9'].includes(rule.value.trim())) throw new ConflictException('La regla «Base del PCL» del torneo debe indicar 7 o 9.');
+        const allIds = mode === 'player' ? [person!] : [...positions.keys()];
+        const groups = players && mode === 'team' ? [allIds, ...allIds.map(id => [id])] : [allIds];
+        for (const [index, ids] of groups.entries()) {
+          const individual = mode === 'player' || index > 0;
+          const ownPositions = [...new Set(ids.flatMap(id => [...(positions.get(id) ?? [])]))];
+          const defense = state.log.filter(entry => entry.side !== side);
+          const fullEvents = game.playByPlay.events.length === game.playByPlay.sequence;
+          const errorEvents = game.playByPlay.events.filter(event => event.defenseTeamId === teamId &&
+            ['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(event.type));
+          const caughtStealing = fullEvents ? game.playByPlay.events.filter(event => event.battingTeamId === teamId &&
+            event.type === 'CAUGHT_STEALING' && event.runnerIdentificationNumber && ids.includes(event.runnerIdentificationNumber)).length : null;
+          const errors = !fullEvents || individual && errorEvents.some(event => !event.fielderIdentificationNumber) ? null :
+            !individual ? ids.reduce((sum, id) => sum + (game.playByPlay.fieldingStatsByIdentification.get(id)?.errors ?? 0), 0) +
+              errorEvents.filter(event => !event.fielderIdentificationNumber).length :
+              ids.reduce((sum, id) => sum + (game.playByPlay.fieldingStatsByIdentification.get(id)?.errors ?? 0), 0);
+          const complete = this.statisticsSourceComplete(game, state);
+          const unknownPitching = defense.some(entry => (entry.result || entry.outs || entry.runs.length || entry.pitch) && !entry.pitcherId) ||
+            state.runAccounting.runs.some(run => run.offenseId !== teamId && run.pitcherId === null);
+          const line = complete ? calculateStatisticsRates(scorecardStatistics(state, side, ids, {
+            team: !individual, positions: ownPositions, caughtStealing, errors, offenseId: teamId,
+            startingPitcherIds: initial.length ? initial.filter(entry => entry.fieldPosition === 'P').map(entry => entry.identificationNumber) : null,
+            battingAtBats: ids.reduce((sum, id) => sum + (game.playByPlay.batterStatsByIdentification.get(id)?.atBats ?? 0), 0),
+            pitchingWalks: ids.reduce((sum, id) => sum + (game.playByPlay.pitcherStatsByIdentification.get(id)?.walksAllowed ?? 0), 0),
+            pitchingComplete: !individual || !unknownPitching,
+          }), eraBase) : null;
+          const status = game.officialState.status;
+          const reason = status === 'protested' ? 'Bajo protesta: pendiente de resolución.' :
+            status === 'suspended' ? 'Suspendido: no se suma al acumulado oficial.' :
+            status === 'scheduled' ? 'Pendiente de inicio.' :
+            status === 'in_progress' ? 'En curso: cifras provisionales, fuera del acumulado oficial.' :
+            game.officialState.protest ? 'Resultado técnico: validación estadística pendiente.' :
+            !sport || !doc?.modality.trim() ? 'Falta definir deporte o modalidad en el torneo.' :
+            !complete ? 'Anotación incompleta o marcador sin respaldo completo de jugadas.' : '';
+          const official = status === 'final' && reason === '';
+          const ownScore = state.scores[side], otherScore = state.scores[side === 'home' ? 'away' : 'home'];
+          const row: StatisticsGame = {
+            gameId: game.gameId, tournamentId: game.tournamentId, tournamentName: doc?.name || game.details?.tournamentName || game.tournamentId,
+            teamId, teamName: (side === 'home' ? game.details?.homeTeamName : game.details?.awayTeamName) ??
+              doc?.teams.find(team => team.id === teamId)?.name ?? teamId,
+            opponentName: (side === 'home' ? game.details?.awayTeamName : game.details?.homeTeamName) ??
+              (side === 'home' ? game.teams.awayTeamId : game.teams.homeTeamId),
+            leagueId: doc?.leagueId ?? '', leagueName: doc?.leagueName ?? '', date: game.details?.date ?? null,
+            season: doc?.season ?? '', sport, modality: doc?.modality.trim() ?? '', category: doc?.category.trim() ?? '', eraBase,
+            version: game.officialState.officialVersion, status,
+            qualification: official ? 'official' : ['in_progress', 'scheduled'].includes(status) ? 'provisional' : 'excluded',
+            reason, public: publicIds.has(game.tournamentId), positions: ownPositions, line,
+            result: official ? ownScore === otherScore ? 'tie' : ownScore > otherScore ? 'win' : 'loss' : null,
+          };
+          if (players && index > 0) {
+            const player = state.seed.rosters[side].find(player => player.id === ids[0]);
+            players.push({ id: `player-${createHash('sha256').update(JSON.stringify([managerId, ids[0]])).digest('hex')}`,
+              name: player?.name && player.name !== ids[0] ? player.name : null,
+              activeTournament: Boolean(doc && !['finished', 'cancelled'].includes(doc.status) &&
+                doc.teams.some(team => team.id === teamId && team.managerId === managerId && team.status !== 'withdrawn') &&
+                this.getTournamentOrThrow(game.tournamentId).teamRosters.get(teamId)?.managerId === managerId), game: row });
+          } else rows.push(row);
+        }
+      }
+    }
+    return rows;
+  }
+
+  private gameParticipantPositions(game: OfficialGameRecord, state: PrivateState, teamId: string, side: 'home' | 'away') {
+    const positions = new Map<string, Set<string>>();
+    const member = (id: string, position?: string) => {
+      if (!positions.has(id)) positions.set(id, new Set());
+      if (position) positions.get(id)!.add(position);
+    };
+    for (const entry of [...(game.teamSheets.get(teamId)?.initialLineup ?? []), ...(game.lineups.get(teamId)?.lineupEntries ?? [])])
+      member(entry.identificationNumber, entry.fieldPosition);
+    for (const request of game.personnelRequests.filter(item => item.teamId === teamId && item.status === 'approved')) {
+      const action = request.action;
+      if (action.kind === 'substitution') {
+        member(action.incomingIdentificationNumber, action.fieldPosition); member(action.outgoingIdentificationNumber);
+      } else if (action.kind === 'defense') member(action.identificationNumber, action.fieldPosition);
+      else if (action.kind === 'courtesy') member(action.incomingIdentificationNumber);
+    }
+
+    for (const entry of state.log) {
+      if (entry.side === side) for (const id of [entry.batterId, entry.runnerId, entry.stolenBy, ...entry.runs]) {
+        if (id) member(id);
+      }
+      else if (entry.pitcherId) member(entry.pitcherId, 'P');
+    }
+    return positions;
+  }
+
+  private statisticsSourceComplete(game: OfficialGameRecord, state: PrivateState): boolean {
+    return !!game.teams && state.log.length > 0 &&
+      state.log.filter(entry => !entry.scoringRules).length === game.playByPlay.sequence &&
+      state.log.filter(entry => entry.result !== null).length === game.playByPlay.plateAppearanceSequence &&
+      (['home', 'away'] as const).every(side => {
+        const offenseId = side === 'home' ? game.teams!.homeTeamId : game.teams!.awayTeamId;
+        return state.log.filter(entry => entry.side === side).reduce((sum, entry) => sum + entry.runs.length, 0) === state.scores[side] &&
+          runTotals(state.runAccounting.runs.filter(run => run.offenseId === offenseId), 'team').total === state.scores[side];
+      });
+  }
+
+  personalCareer(identification: string, actorId: string): CareerGame[] {
+    const person = this.normalizeIdentificationNumber(identification, 'identificación deportiva');
+    const actor = this.requireText(actorId, 'identidad deportiva verificada');
+    const matchesActor = (id: string) => id === actor || this.actorIdentifications.get(id) === person;
+    const published = new Set(this.publicSportsTournaments().tournaments.map(tournament => tournament.id));
+    const rows: CareerGame[] = [];
+    for (const game of this.games.values()) {
+      if (!game.teams || game.officialState.status === 'scheduled' || !game.hasStarted ||
+          game.playByPlay.scorecardLog.length === 0 && game.playByPlay.sequence === 0) continue;
+      const tournament = this.getTournamentOrThrow(game.tournamentId);
+      const doc = this.tournamentPlanning?.document(game.tournamentId);
+      const state = this.serializeScorecard(game, tournament);
+      const homeTeamName = game.details?.homeTeamName ?? doc?.teams.find(team => team.id === game.teams!.homeTeamId)?.name ?? game.teams.homeTeamId;
+      const awayTeamName = game.details?.awayTeamName ?? doc?.teams.find(team => team.id === game.teams!.awayTeamId)?.name ?? game.teams.awayTeamId;
+      const append = (role: CareerRole, teamId: string | null, teamName: string | null, positions: string[]) => rows.push({
+        gameId: game.gameId, tournamentId: game.tournamentId,
+        tournamentName: doc?.name || game.details?.tournamentName || game.tournamentId,
+        leagueId: doc?.leagueId ?? '', leagueName: doc?.leagueName ?? '', sport: doc?.sport.trim() ?? '',
+        modality: doc?.modality.trim() ?? '', category: doc?.category.trim() ?? '', season: doc?.season.trim() ?? '',
+        date: game.details?.date ?? null, homeTeamName, awayTeamName, teamId, teamName, role, positions,
+        evidence: role === 'scorekeeper' ? 'scoring' as const : role === 'organizer' ? 'organization' as const : 'lineup' as const,
+        status: game.officialState.status, version: game.officialState.officialVersion,
+        public: published.has(game.tournamentId), technical: Boolean(game.officialState.protest),
+      });
+      for (const side of ['home', 'away'] as const) {
+        const teamId = side === 'home' ? game.teams.homeTeamId : game.teams.awayTeamId;
+        const teamName = side === 'home' ? homeTeamName : awayTeamName;
+        const positions = this.gameParticipantPositions(game, state, teamId, side);
+        if (positions.has(person)) append('player', teamId, teamName, [...positions.get(person)!]);
+        const manager = game.teamSheets.get(teamId)?.managerId ?? game.lineups.get(teamId)?.managerId;
+        if (manager && matchesActor(manager)) append('manager', teamId, teamName, []);
+      }
+      const effectiveStates = [game.officialState, ...game.scoringHistory.map(entry => entry.state),
+        ...game.suspensionArchives.map(entry => entry.state)];
+      for (const role of ['scorekeeper', 'organizer'] as const)
+        if (effectiveStates.some(entry => entry.updatedBy?.role === role && matchesActor(entry.updatedBy.id)))
+          append(role, null, null, []);
+    }
+    return rows;
+  }
+
+  lookupRosterPerson(input: string): RosterPerson | null {
+    const key = this.requireText(input, 'cédula o ID').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const person = this.globalPlayersByIdentification.get(key);
+    if (!person) return null;
+    return { id: person.identificationNumber, identification: person.isMinor ? '' : person.identificationNumber,
+      fullName: person.displayName, isMinor: person.isMinor, registrationStatus: 'sports-record' };
+  }
+
+  listOrganizerRosterTournaments(organizerIdRaw: string) {
+    const organizerId = this.requireText(organizerIdRaw, 'organizerId');
+    return Array.from(this.tournamentAuthorizations.values()).filter(row => row.organizerId === organizerId).map(row => {
+      const context = this.rosterRulesContext(row.tournamentId);
+      return { tournamentId: context.tournamentId, tournamentName: context.tournamentName };
+    });
+  }
+
+  publicFavoritePlayers() {
+    return this.publicSportsTournaments().tournaments.flatMap(tournament =>
+      tournament.teams.flatMap(team => {
+        const planned = this.tournamentPlanning?.document(tournament.id)?.teams.find(row => row.id === team.id);
+        if (planned && (planned.status !== 'accepted' || planned.rosterStatus !== 'approved')) return [];
+        const roster = this.tournamentAuthorizations.get(tournament.id)?.teamRosters.get(team.id);
+        if (!roster) return [];
+        return Array.from(roster.playerIdentificationNumbers).map(id => {
+          const player = this.globalPlayersByIdentification.get(id);
+          if (!player) throw new ConflictException('No se pudo resolver un jugador del roster público.');
+          return { identificationNumber: player.identificationNumber, name: player.displayName, tournamentId: tournament.id, teamId: team.id };
+        });
+      }));
+  }
+
+  institutionalIdentities(includePrivate = false): InstitutionalIdentity[] {
+    const planned = this.tournamentPlanning?.institutions?.(includePrivate) ?? [];
+    const keys = new Set(planned.map(row => `${row.kind}:${row.id}`));
+    const live = Array.from(this.tournamentAuthorizations.values()).flatMap(tournament => {
+      const plan = this.tournamentPlanning?.document(tournament.tournamentId);
+      const managerOwned = (teamId: string) => !!plan?.teams.find(team => team.id === teamId)?.enrollment;
+      if (!includePrivate && plan && this.tournamentPlanning?.published?.(plan.id) === false) return [];
+      const games = Array.from(this.games.values()).filter(game => game.tournamentId === tournament.tournamentId && game.teams);
+      return [
+        { kind: 'tournament' as const, id: tournament.tournamentId,
+          name: this.tournamentPlanning?.document(tournament.tournamentId)?.name || this.tournamentPlanning?.document(tournament.tournamentId)?.leagueName || games.find(game => game.details)?.details?.tournamentName || tournament.tournamentId,
+          organizerId: tournament.organizerId, managerId: null, tournamentId: tournament.tournamentId, managerOwned: false },
+        ...Array.from(tournament.teamRosters.values()).map(roster => {
+          const game = games.find(game => game.details && game.teams &&
+            [game.teams.homeTeamId, game.teams.awayTeamId].includes(roster.teamId));
+          return { kind: 'team' as const, id: roster.teamId,
+            name: this.tournamentPlanning?.document(tournament.tournamentId)?.teams.find(team => team.id === roster.teamId)?.name ??
+              (game?.teams?.homeTeamId === roster.teamId ? game.details?.homeTeamName ?? roster.teamId : game?.details?.awayTeamName ?? roster.teamId),
+            organizerId: tournament.organizerId, managerId: roster.managerId, tournamentId: tournament.tournamentId, managerOwned: managerOwned(roster.teamId) };
+        })
+      ];
+    });
+    return [...planned, ...live.filter(row => !keys.has(`${row.kind}:${row.id}`))];
+  }
+
+  rosterRulesContext(tournamentId: string): RosterRulesContext {
+    const tournament = this.getTournamentOrThrow(tournamentId);
+    const games = Array.from(this.games.values()).filter(game => game.tournamentId === tournamentId && game.teams);
+    const members: RosterRulesContext['members'] = {};
+    for (const roster of tournament.teamRosters.values()) members[roster.teamId] = Array.from(roster.playerIdentificationNumbers).map(id => {
+      const person = this.registration?.rosterPerson(id) ?? this.lookupRosterPerson(id);
+      if (!person) throw new ConflictException('No se pudo resolver un integrante del roster.');
+      return { person, role: 'PLAYER' as const, approvalStatus: 'approved' as const };
+    });
+    return { tournamentId, tournamentName: this.tournamentPlanning?.document(tournamentId)?.name || this.tournamentPlanning?.document(tournamentId)?.leagueName || games.find(game => game.details)?.details?.tournamentName || tournamentId,
+      organizerId: tournament.organizerId, members, teamIds: Array.from(tournament.teamRosters.keys()),
+      games: games.flatMap(game => !game.teams ? [] : [{ gameId: game.gameId, ...game.teams, status: game.officialState.status,
+        started: ['in_progress', 'final', 'protested'].includes(game.officialState.status) ||
+          game.officialState.suspension?.wasStarted === true || game.suspensionArchives.some(entry => entry.suspension.wasStarted) ||
+          game.playByPlay.scorecardLog.length > 0 || game.playByPlay.events.length > 0 || game.playByPlay.plateAppearances.length > 0,
+        label: game.details ? `${game.details.awayTeamName} vs. ${game.details.homeTeamName}` : game.gameId }]) };
+  }
+
+  private observeRosterClosure(tournamentId: string, gameId?: string, status?: OfficialGameStatus) {
+    if (!this.registration) return;
+    const context = this.rosterRulesContext(tournamentId);
+    this.registration.rosterRules(context);
+    if (gameId && status) this.registration.rosterRules({ ...context, games: context.games.map(game => game.gameId === gameId ?
+      { ...game, status, started: game.started || ['in_progress', 'final', 'protested'].includes(status) } : game) });
+  }
+
+  assertManagerRosterAddition(team: ManagerRosterTeam, role: RosterRole, person: RosterPerson) {
+    this.tournamentPlanning?.assertParticipation(team.tournamentId, '', team.teamId, [person.identification || person.id], 'roster');
+    const tournament = this.getTournamentOrThrow(team.tournamentId);
+    if (this.getTeamRosterOrThrow(tournament, team.teamId).managerId !== team.managerId) throw new ForbiddenException('Solo el manager actual puede incorporar personal.');
+    if (role !== 'DELEGADO') {
+      const key = this.rosterPersonKey(person);
+      this.assertRoleCompatible(tournament, key, 'participant');
+      if (role === 'PLAYER') this.assertPlayersNotInOtherTeamRoster(tournament, team.teamId, [key]);
+    }
+  }
+
+  private rosterPersonKey(person: RosterPerson) { return this.normalizeIdentificationNumber(person.identification || person.id, 'cédula o ID'); }
+
+  private refreshDirectRosterMembers(tournament: TournamentAuthorizationRecord) {
+    const members = this.registration?.rosterPersonnel(tournament.tournamentId) ?? [];
+    const playerTeams = new Map<string, string>();
+    for (const { teamId, person, role } of members) {
+      if (!tournament.teamRosters.has(teamId)) continue;
+      const key = this.rosterPersonKey(person);
+      if (role !== 'DELEGADO') this.assertRoleCompatible(tournament, key, 'participant');
+      if (role === 'PLAYER') {
+        this.assertPlayersNotInOtherTeamRoster(tournament, teamId, [key]);
+        if (playerTeams.has(key) && playerTeams.get(key) !== teamId) throw new ConflictException('Una persona persistida no puede jugar para dos equipos del mismo torneo.');
+        playerTeams.set(key, teamId);
+      }
+    }
+    for (const { teamId, person, role } of members) {
+      const roster = tournament.teamRosters.get(teamId);
+      if (!roster) continue;
+      const key = this.rosterPersonKey(person);
+      if (role !== 'DELEGADO') tournament.participantIdentifications.add(key);
+      if (role !== 'PLAYER') continue;
+      if (!this.globalPlayersByIdentification.has(key)) {
+        const now = this.nowIso();
+        this.globalPlayersByIdentification.set(key, { privateRegistration: true, displayName: person.fullName,
+          identificationNumber: key, isMinor: person.isMinor, representativeIdentificationNumber: null,
+          extraProfile: {}, createdAt: now, updatedAt: now, createdById: roster.managerId });
+      }
+      roster.playerIdentificationNumbers.add(key);
+    }
+  }
+
+  listOfficialGames(userIdRaw: string, role: AppRole, tournamentConsultation = false): OfficialGamesSnapshot {
+    const userId = this.requireText(userIdRaw, 'userId');
+    if (role !== 'organizer' && role !== 'scorekeeper' && role !== 'manager') throw new ForbiddenException('Este perfil no tiene una bandeja de partidos asignados.');
+    const games: OfficialGameSummary[] = [];
+    for (const game of this.games.values()) {
+      const tournament = this.getTournamentOrThrow(game.tournamentId);
+      if (!game.teams) continue;
+      const managerTeamId = role === 'manager' ? [game.teams.homeTeamId, game.teams.awayTeamId]
+        .find(id => tournament.teamRosters.get(id)?.managerId === userId) : undefined;
+      if (role === 'manager' ? !managerTeamId : role === 'organizer' ? tournament.organizerId !== userId :
+        !(tournamentConsultation ? tournament.authorizedScorekeepers.has(userId) || this.isScorekeeperSubstitute(userId, game.tournamentId, game.gameId) :
+          this.canWriteOfficial(game, tournament, userId, role))) continue;
+      games.push({
+        gameId: game.gameId, tournamentId: game.tournamentId,
+        ...game.teams, status: game.officialState.status,
+        homeScore: game.officialState.homeScore, awayScore: game.officialState.awayScore,
+        details: game.details ? { ...game.details } : null,
+        ...(managerTeamId ? { managerTeamId } : {}),
+        ...(game.officialState.protest ? { protest: structuredClone(game.officialState.protest) } : {}),
+        ...(game.officialState.suspension ? { suspension: structuredClone(game.officialState.suspension) } : {}),
+        assignedScorekeeperIds: this.serializeGameAuthorization(game, tournament).effectiveScorekeeperIds,
+        availableScorekeeperIds: [...new Set([...tournament.authorizedScorekeepers,
+          ...this.serializeGameAuthorization(game, tournament).effectiveScorekeeperIds])],
+        scoringBlockReason: role === 'manager' ? null : this.scoringBlockReason(game.gameId, userId)
+      });
+    }
+    games.sort((a, b) => (a.details?.date ?? '9999').localeCompare(b.details?.date ?? '9999') ||
+      (a.details?.time ?? '').localeCompare(b.details?.time ?? '') || a.gameId.localeCompare(b.gameId));
+    return { userId, role, games };
+  }
+
+  getOfficialStandings(): { games: OfficialStandingGame[] } {
+    return { games: Array.from(this.games.values()).flatMap(game => !game.teams ? [] : [{
+      gameId: game.gameId, tournamentId: game.tournamentId, ...game.teams, status: game.officialState.status,
+      homeScore: game.officialState.homeScore, awayScore: game.officialState.awayScore,
+      details: game.details ? { ...game.details } : null,
+      ...(game.officialState.protest ? { protest: structuredClone(game.officialState.protest) } : {}),
+      ...(game.officialState.suspension ? { suspension: structuredClone(game.officialState.suspension) } : {})
+    }]) };
+  }
+
+  getGameChatContext(gameId: string) {
+    const game = this.games.get(gameId);
+    if (!game?.teams) throw new NotFoundException('Este partido oficial no está disponible para el chat.');
+    return { status: game.officialState.status, finishedAt: game.chatFinishedAt ?? null };
+  }
+
+  @OfficialMutation
+  declareGameProtest(input: { gameId: string; tournamentId: string; actorId: string; actorRole: string;
+    expectedOfficialVersion: number; teamId: string; reason: string }) {
+    const tournament = this.getTournamentOrThrow(input.tournamentId);
+    const game = this.getOrCreateGame(input.gameId, input.tournamentId);
+    if (input.actorRole !== 'scorekeeper' || !this.canWriteOfficial(game, tournament, input.actorId, 'scorekeeper')) {
+      throw new ForbiddenException('Solo el anotador asignado puede registrar el juego bajo protesta.');
+    }
+    this.assertScoringAvailable(game, input.actorId);
+    if (game.officialState.status !== 'in_progress' || game.officialState.protest) {
+      throw new ConflictException('Solo un juego en curso y sin protesta previa puede quedar bajo protesta.');
+    }
+    this.assertProtestVersion(game, input.expectedOfficialVersion);
+    if (!game.teams || ![game.teams.homeTeamId, game.teams.awayTeamId].includes(input.teamId)) {
+      throw new BadRequestException('Selecciona el equipo que presenta la protesta.');
+    }
+    const reason = this.requireText(input.reason, 'motivo de la protesta');
+    if (reason.length > 2000) throw new BadRequestException('El motivo admite hasta 2000 caracteres.');
+    const { inning, outs, balls, strikes, homeScore, awayScore, officialVersion, lastPlay } = game.officialState;
+    this.observeRosterClosure(game.tournamentId);
+    game.officialState = {
+      ...game.officialState, status: 'protested',
+      ...(game.officialState.clock ? { clock: pauseGameClock(game.officialState.clock, this.nowIso()) } : {}),
+      protest: { teamId: input.teamId, reason, declaredAt: this.nowIso(), declaredBy: input.actorId,
+        moment: { inning, outs, balls, strikes, homeScore, awayScore, officialVersion, lastPlay }, resolution: null },
+      lastPlay: 'Juego bajo protesta. Pendiente de mesa técnica.', updatedBy: { id: input.actorId, role: 'scorekeeper' }
+    };
+    this.publishPersonnel(game, tournament);
+    this.publishScoringAvailability();
+    return this.getOfficialState(game.gameId, game.tournamentId);
+  }
+
+  @OfficialMutation
+  resolveGameProtest(input: { gameId: string; tournamentId: string; organizerId: string; expectedOfficialVersion: number;
+    winnerTeamId: string; reason: string; recordReference: string }) {
+    const tournament = this.getTournamentOrThrow(input.tournamentId);
+    if (tournament.organizerId !== input.organizerId) throw new ForbiddenException('Solo el organizador del torneo puede registrar el acta de mesa técnica.');
+    const game = this.getOrCreateGame(input.gameId, input.tournamentId);
+    if (game.officialState.status !== 'protested' || !game.officialState.protest || game.officialState.protest.resolution) {
+      throw new ConflictException('No hay una protesta pendiente de resolución.');
+    }
+    this.assertProtestVersion(game, input.expectedOfficialVersion);
+    if (!game.teams || ![game.teams.homeTeamId, game.teams.awayTeamId].includes(input.winnerTeamId)) {
+      throw new BadRequestException('El ganador debe ser uno de los equipos del partido.');
+    }
+    const reason = this.requireText(input.reason, 'fundamento de la decisión');
+    const recordReference = this.requireText(input.recordReference, 'referencia del acta');
+    if (reason.length > 4000 || recordReference.length > 500) throw new BadRequestException('El fundamento admite 4000 caracteres y la referencia 500.');
+    const loserTeamId = input.winnerTeamId === game.teams.homeTeamId ? game.teams.awayTeamId : game.teams.homeTeamId;
+    this.observeRosterClosure(game.tournamentId, game.gameId, 'final');
+    game.officialState = {
+      ...game.officialState, status: 'final', lastPlay: 'Resultado determinado por mesa técnica.',
+      protest: { ...game.officialState.protest, resolution: {
+        winnerTeamId: input.winnerTeamId, loserTeamId, reason, recordReference, recordedAt: this.nowIso(), recordedBy: input.organizerId
+      } }, updatedBy: { id: input.organizerId, role: 'organizer' }
+    };
+    game.chatFinishedAt = this.nowIso();
+    this.publishPersonnel(game, tournament);
+    this.publishScoringAvailability();
+    return this.getOfficialState(game.gameId, game.tournamentId);
+  }
+
+  private assertProtestVersion(game: OfficialGameRecord, version: number) {
+    if (!Number.isSafeInteger(version) || version < 0) throw new BadRequestException('La operación requiere la versión actual de la pizarra.');
+    if (version !== game.officialState.officialVersion) throw new ConflictException('La pizarra cambió. Actualízala antes de registrar la protesta o su decisión.');
+  }
+
+  @OfficialMutation
+  suspendGame(input: { gameId: string; tournamentId: string; actorId: string; actorRole: string;
+    expectedOfficialVersion: number; cause: unknown; scoreHandling: unknown; reason: string }) {
+    const tournament = this.getTournamentOrThrow(input.tournamentId);
+    const game = this.getOrCreateGame(input.gameId, input.tournamentId);
+    if ((input.actorRole !== 'organizer' && input.actorRole !== 'scorekeeper') ||
+        !this.canWriteOfficial(game, tournament, input.actorId, input.actorRole)) throw new ForbiddenException('Solo el organizador o anotador asignado puede suspender el juego.');
+    if (!['scheduled', 'in_progress'].includes(game.officialState.status) || game.officialState.protest) throw new ConflictException('Solo se aplazan juegos pendientes o en curso, sin protesta.');
+    if (!game.teams || !game.details) throw new ConflictException('Completa equipos y ficha de sede antes de suspender el partido.');
+    this.assertProtestVersion(game, input.expectedOfficialVersion);
+    const reason = this.requireText(input.reason, 'motivo de suspensión');
+    if (!['weather', 'force-majeure'].includes(String(input.cause)) || !['keep', 'reset'].includes(String(input.scoreHandling)) || reason.length > 2000) {
+      throw new BadRequestException('Indica clima o fuerza mayor, motivo y si se conserva o reinicia el juego completo.');
+    }
+    const suspension: GameSuspension = { id: `${game.gameId}:suspension:${game.suspensionArchives.length + 1}`,
+      cause: input.cause === 'weather' ? 'weather' : 'force-majeure', scoreHandling: input.scoreHandling === 'keep' ? 'keep' : 'reset',
+      reason, recordedAt: this.nowIso(), recordedBy: input.actorId, role: input.actorRole === 'organizer' ? 'organizer' : 'scorekeeper',
+      wasStarted: game.officialState.status === 'in_progress' || game.playByPlay.scorecardLog.length > 0 ||
+        game.playByPlay.events.length > 0 || game.playByPlay.plateAppearances.length > 0 ||
+        game.officialState.homeScore > 0 || game.officialState.awayScore > 0,
+      originalDate: game.details?.date ?? null, originalTime: game.details?.time ?? null, rescheduled: null };
+    this.observeRosterClosure(game.tournamentId);
+    if (game.officialState.clock) game.officialState.clock = pauseGameClock(game.officialState.clock, this.nowIso());
+    game.suspensionArchives.push(structuredClone({ suspension, state: game.officialState,
+      lineup: this.serializeLineupStatus(game, tournament), playByPlay: this.serializePlayByPlay(game, tournament) }));
+    if (suspension.scoreHandling === 'reset') {
+      delete game.officialState.clock;
+      game.playByPlay = this.emptyPlayByPlay();
+      for (const lineup of game.lineups.values()) lineup.currentBatterIndex = 0;
+      game.officialState = { ...game.officialState, inning: 1, outs: 0, balls: 0, strikes: 0, homeScore: 0, awayScore: 0,
+        offenseTeamId: game.teams?.awayTeamId ?? null, lastBatterId: null,
+        nextBatterId: game.teams ? this.resolveNextBatterId(game, game.teams.awayTeamId) : null };
+    }
+    game.scoringHistory = [];
+    game.scoringActors.clear();
+    game.officialState = { ...game.officialState, status: 'suspended', suspension, lastPlay: 'Juego suspendido. Nueva fecha pendiente.',
+      updatedBy: { id: input.actorId, role: suspension.role } };
+    this.publishPersonnel(game, tournament); this.publishScoringAvailability();
+    return this.getOfficialState(game.gameId, game.tournamentId);
+  }
+
+  @OfficialMutation
+  rescheduleGame(input: { gameId: string; tournamentId: string; organizerId: string; expectedOfficialVersion: number; date: string; time: string }) {
+    const tournament = this.getTournamentOrThrow(input.tournamentId);
+    if (tournament.organizerId !== input.organizerId) throw new ForbiddenException('Solo el organizador puede fijar la nueva fecha.');
+    const game = this.getOrCreateGame(input.gameId, input.tournamentId);
+    if (game.officialState.status !== 'suspended' || !game.officialState.suspension || !game.details) throw new ConflictException('Este juego no está suspendido o le falta su ficha de sede.');
+    this.assertProtestVersion(game, input.expectedOfficialVersion);
+    if (!isCalendarDate(input.date) || !isGameTime(input.time)) throw new BadRequestException('Indica una nueva fecha y hora válidas.');
+    const suspension: GameSuspension = { ...game.officialState.suspension,
+      rescheduled: { date: input.date, time: input.time, recordedBy: input.organizerId, recordedAt: this.nowIso() } };
+    this.observeRosterClosure(game.tournamentId);
+    game.details = { ...game.details, date: input.date, time: input.time };
+    const archive = game.suspensionArchives.find(entry => entry.suspension.id === suspension.id);
+    if (archive) archive.suspension = structuredClone(suspension);
+    game.officialState = { ...game.officialState, suspension, status: 'scheduled', lastPlay: 'Partido reprogramado. Pendiente de iniciar.',
+      updatedBy: { id: input.organizerId, role: 'organizer' } };
+    this.publishPersonnel(game, tournament); this.publishScoringAvailability();
+    return this.getOfficialState(game.gameId, game.tournamentId);
+  }
+
+  suspensionArchive(gameId: string, tournamentId: string, id?: string) {
+    this.getTournamentOrThrow(tournamentId);
+    const game = this.getOrCreateGame(gameId, tournamentId);
+    const entries = game.suspensionArchives;
+    if (!id) return { interruptions: entries.map(entry => structuredClone(entry.suspension)) };
+    const entry = entries.find(entry => entry.suspension.id === id);
+    if (!entry) throw new NotFoundException('No existe esta anotación archivada.');
+    return structuredClone(entry);
+  }
+
+  @OfficialMutation
+  configureGameDetails(command: { gameId: string; tournamentId: string; organizerId: string; details: unknown }) {
+    const tournament = this.getTournamentOrThrow(command.tournamentId);
+    if (tournament.organizerId !== this.requireText(command.organizerId, 'organizerId')) throw new ForbiddenException('Solo el organizador del torneo puede editar los datos del partido.');
+    if (!isOfficialGameDetails(command.details)) throw new BadRequestException('Revisa equipos, torneo, fecha, hora, estadio y ubicación de la sede del partido.');
+    const game = this.getOrCreateGame(command.gameId, tournament.tournamentId);
+    this.assertProtestUnlocked(game);
+    game.details = { ...command.details };
+    return { gameId: game.gameId, tournamentId: game.tournamentId, details: { ...game.details } };
+  }
+
+  @OfficialMutation
   configureGameTeams(command: GameTeamsCommand) {
     const gameId = this.requireText(command.gameId, 'gameId');
     const tournamentId = this.requireText(command.tournamentId, 'tournamentId');
@@ -937,6 +2109,7 @@ export class OfficialScoringService {
     this.getTeamRosterOrThrow(tournament, awayTeamId);
 
     const game = this.getOrCreateGame(gameId, tournamentId);
+    this.assertProtestUnlocked(game);
     if (game.teamSheets.size > 0 && game.teams &&
         (game.teams.homeTeamId !== homeTeamId || game.teams.awayTeamId !== awayTeamId)) {
       throw new ConflictException('No se pueden cambiar los participantes después de entregar una alineación.');
@@ -957,6 +2130,7 @@ export class OfficialScoringService {
     };
   }
 
+  @OfficialMutation
   authorizeFieldRepresentative(command: {
     gameId: string;
     tournamentId: string;
@@ -975,15 +2149,13 @@ export class OfficialScoringService {
     if (!game.teams || ![game.teams.homeTeamId, game.teams.awayTeamId].includes(teamId)) {
       throw new BadRequestException('El equipo no participa en este partido.');
     }
+    this.assertProtestUnlocked(game);
     if (game.officialState.status === 'final') {
       throw new BadRequestException('No se puede cambiar al representante de un partido finalizado.');
     }
     const identificationNumber = this.normalizeIdentificationNumber(command.identificationNumber, 'cedula');
-    if (!roster.playerIdentificationNumbers.has(identificationNumber)) {
+    if (!this.matchRosterPerson(tournament, teamId, identificationNumber)) {
       throw new BadRequestException('El representante debe pertenecer a la plantilla oficial del equipo.');
-    }
-    if (!this.globalPlayersByIdentification.has(identificationNumber)) {
-      throw new BadRequestException('La cédula no existe en el registro global.');
     }
     game.fieldRepresentatives.set(teamId, {
       identificationNumber,
@@ -1012,13 +2184,20 @@ export class OfficialScoringService {
   private serializeFieldRepresentative(game: OfficialGameRecord, teamId: string): FieldRepresentativeProjection | null {
     const representative = game.fieldRepresentatives.get(teamId);
     if (!representative) return null;
-    const player = this.globalPlayersByIdentification.get(representative.identificationNumber);
-    if (!player) {
-      throw new NotFoundException('El representante autorizado no existe en el registro global.');
-    }
-    return { ...representative, displayName: player.displayName };
+    const person = this.registration?.rosterPerson(representative.identificationNumber) ?? this.lookupRosterPerson(representative.identificationNumber);
+    if (!person) throw new NotFoundException('No se encontró la identidad del dirigente autorizado para este partido.');
+    return { ...representative, displayName: person.fullName };
   }
 
+  private matchRosterPerson(tournament: TournamentAuthorizationRecord, teamId: string, identification: string): RosterPerson | null {
+    const direct = this.registration?.rosterPersonnel(tournament.tournamentId)
+      .find(row => row.teamId === teamId && this.rosterPersonKey(row.person) === identification);
+    if (direct) return direct.person;
+    if (!tournament.teamRosters.get(teamId)?.playerIdentificationNumbers.has(identification)) return null;
+    return this.lookupRosterPerson(identification);
+  }
+
+  @OfficialMutation
   configureGameLineup(command: GameLineupCommand) {
     const gameId = this.requireText(command.gameId, 'gameId');
     const tournamentId = this.requireText(command.tournamentId, 'tournamentId');
@@ -1048,6 +2227,7 @@ export class OfficialScoringService {
 
     const tournament = this.getTournamentOrThrow(tournamentId);
     const teamRoster = this.getTeamRosterOrThrow(tournament, teamId);
+    this.tournamentPlanning?.assertParticipation(tournamentId, gameId, teamId, lineupEntries.map(entry => entry.identificationNumber), 'lineup');
 
     if (teamRoster.managerId !== managerId) {
       throw new ForbiddenException(`El manager ${managerId} no esta autorizado para el equipo ${teamId}.`);
@@ -1080,6 +2260,7 @@ export class OfficialScoringService {
       Array.isArray(command.presentSubstituteIdentificationNumbers) && command.presentSubstituteIdentificationNumbers.length === 0 ? [] :
       this.sanitizeIdentificationList(command.presentSubstituteIdentificationNumbers, 'suplentes presentes');
     const officials = this.sanitizePresentOfficials(command.presentOfficials ?? []);
+    this.assertTeamStaffCompatible(tournament, officials);
     for (const id of substitutes) {
       if (!teamRoster.playerIdentificationNumbers.has(id) || lineupEntries.some((entry) => entry.identificationNumber === id)) {
         throw new BadRequestException('Los suplentes presentes deben estar inscritos y no pertenecer a la alineación inicial.');
@@ -1110,6 +2291,7 @@ export class OfficialScoringService {
       presentOfficials: officials, initialLineup: structuredClone(lineupEntries), initialSignature: signature,
       submittedAt: lineup.updatedAt, updatedAt: lineup.updatedAt
     });
+    this.rememberTeamStaff(tournament, officials);
 
     if (game.officialState.offenseTeamId === teamId) {
       game.officialState.nextBatterId = playerIdentificationNumbers[0] ?? null;
@@ -1136,6 +2318,50 @@ export class OfficialScoringService {
     };
   }
 
+  private canWithdrawLineup(game: OfficialGameRecord): boolean {
+    return game.officialState.status === 'scheduled' && !game.hasStarted &&
+      !game.officialState.protest && !game.officialState.suspension &&
+      game.playByPlay.scorecardLog.length === 0 && game.playByPlay.events.length === 0 &&
+      game.playByPlay.plateAppearances.length === 0 &&
+      game.officialState.homeScore === 0 && game.officialState.awayScore === 0;
+  }
+
+  @OfficialMutation
+  withdrawTeamSheet(command: {
+    gameId: string; tournamentId: string; teamId: string; managerId: string;
+    expectedRevision: number; expectedVersion: number;
+  }): TeamSheetsSnapshot {
+    const tournament = this.getTournamentOrThrow(command.tournamentId);
+    const game = this.getOrCreateGame(command.gameId, tournament.tournamentId);
+    const roster = this.getTeamRosterOrThrow(tournament, command.teamId);
+    if (roster.managerId !== command.managerId ||
+        !game.teams || ![game.teams.homeTeamId, game.teams.awayTeamId].includes(command.teamId)) {
+      throw new ForbiddenException('Solo el dirigente participante puede cancelar la alineación de su propio equipo.');
+    }
+    this.assertPersonnelOpen(game);
+    if (!this.canWithdrawLineup(game)) {
+      throw new ConflictException('Solo puedes cancelar la alineación antes de que comience el partido. Una vez iniciado, los cambios los registra el anotador u organizador.');
+    }
+    const sheet = game.teamSheets.get(command.teamId);
+    if (!sheet) throw new ConflictException('Esta alineación ya no está enviada. Actualiza los datos del partido.');
+    if (sheet.revision !== command.expectedRevision || game.personnelVersion !== command.expectedVersion) {
+      throw new ConflictException('La entrega cambió. Actualiza los datos antes de cancelar la alineación.');
+    }
+    const now = this.nowIso();
+    for (const request of game.personnelRequests) {
+      if (request.teamId === command.teamId && request.status === 'pending') {
+        request.status = 'rejected';
+        request.decidedAt = now;
+        request.decisionNote = 'El dirigente canceló la alineación antes del inicio del partido.';
+      }
+    }
+    game.teamSheets.delete(command.teamId);
+    game.lineups.delete(command.teamId);
+    if (game.officialState.offenseTeamId === command.teamId) game.officialState.nextBatterId = null;
+    this.publishPersonnel(game, tournament);
+    return this.getTeamSheets(game.gameId, game.tournamentId, command.managerId, 'manager');
+  }
+
   getTeamSheets(gameId: string, tournamentId: string, userIdRaw: string, role: AppRole): TeamSheetsSnapshot {
     const tournament = this.getTournamentOrThrow(tournamentId);
     const game = this.getOrCreateGame(gameId, tournament.tournamentId);
@@ -1150,11 +2376,13 @@ export class OfficialScoringService {
     });
     return {
       gameId: game.gameId, tournamentId: game.tournamentId, version: game.personnelVersion, canDecide, ownTeamId,
+      scoringBlockReason: canDecide ? this.scoringBlockReason(game.gameId, userId) : null,
       sheets: Array.from(game.teamSheets.values()).map((sheet) => {
         const lineup = game.lineups.get(sheet.teamId);
         if (!lineup) throw new NotFoundException('No se encontró la alineación de la entrega.');
         return {
           teamId: sheet.teamId, managerId: sheet.managerId, revision: sheet.revision,
+          canWithdraw: role === 'manager' && ownTeamId === sheet.teamId && this.canWithdrawLineup(game),
           lineup: lineup.lineupEntries.map(player), initialLineup: sheet.initialLineup.map(player),
           presentSubstitutes: sheet.presentPlayers.filter((id) => !lineup.lineupEntries.some((entry) => entry.identificationNumber === id)).map((id) => ({
             identificationNumber: id, displayName: this.globalPlayersByIdentification.get(id)?.displayName ?? id
@@ -1196,6 +2424,7 @@ export class OfficialScoringService {
     });
   }
 
+  @OfficialMutation
   requestPersonnelChange(command: {
     gameId: string; tournamentId: string; teamId: string; managerId: string;
     expectedRevision: number; action: unknown;
@@ -1223,6 +2452,7 @@ export class OfficialScoringService {
     return this.getTeamSheets(game.gameId, game.tournamentId, command.managerId, 'manager');
   }
 
+  @OfficialMutation
   decidePersonnelChange(command: {
     gameId: string; tournamentId: string; requestId: string; actorId: string;
     actorRole: AppRole; decision: 'approve' | 'reject'; expectedRevision: number; note?: string;
@@ -1234,6 +2464,7 @@ export class OfficialScoringService {
       throw new ForbiddenException('Solo el anotador u organizador autorizado puede confirmar movimientos.');
     }
     this.assertPersonnelOpen(game);
+    this.assertScoringAvailable(game, command.actorId);
     if (!['approve', 'reject'].includes(command.decision)) throw new BadRequestException('Selecciona confirmar o rechazar.');
     const request = game.personnelRequests.find((entry) => entry.id === command.requestId);
     if (!request) throw new NotFoundException('La solicitud no existe en este partido.');
@@ -1249,6 +2480,7 @@ export class OfficialScoringService {
     if (command.decision === 'reject' && !note) throw new BadRequestException('Indica el motivo del rechazo.');
     if (command.decision === 'approve') {
       this.applyPersonnelChange(game, tournament, request);
+      this.claimScoring(game, command.actorId);
     }
     request.status = command.decision === 'approve' ? 'approved' : 'rejected';
     request.decidedAt = this.nowIso();
@@ -1258,6 +2490,7 @@ export class OfficialScoringService {
     return this.getTeamSheets(game.gameId, game.tournamentId, command.actorId, command.actorRole);
   }
 
+  @OfficialMutation
   recordPersonnelChange(command: {
     gameId: string; tournamentId: string; teamId: string; actorId: string; actorRole: AppRole;
     expectedRevision: number; expectedOfficialVersion: number; action: unknown;
@@ -1269,6 +2502,7 @@ export class OfficialScoringService {
       throw new ForbiddenException('Solo el anotador u organizador autorizado puede registrar cambios.');
     }
     this.assertPersonnelOpen(game);
+    this.assertScoringAvailable(game, command.actorId);
     const sheet = game.teamSheets.get(command.teamId);
     if (!sheet) throw new BadRequestException('Recibe primero el lineup de este equipo.');
     if (sheet.revision !== command.expectedRevision || game.officialState.officialVersion !== command.expectedOfficialVersion) {
@@ -1284,6 +2518,7 @@ export class OfficialScoringService {
     };
     this.applyPersonnelChange(game, tournament, request);
     game.personnelRequests.push(request);
+    this.claimScoring(game, command.actorId);
     this.publishPersonnel(game, tournament);
     return this.getTeamSheets(game.gameId, game.tournamentId, command.actorId, command.actorRole);
   }
@@ -1312,6 +2547,7 @@ export class OfficialScoringService {
       lineup.updatedAt = this.nowIso();
       sheet.presentPlayers = next.presentPlayers;
       sheet.presentOfficials = next.presentOfficials;
+      this.rememberTeamStaff(tournament, next.presentOfficials);
       sheet.revision += 1;
       sheet.updatedAt = lineup.updatedAt;
       request.appliedRevision = sheet.revision;
@@ -1368,6 +2604,12 @@ export class OfficialScoringService {
         break;
       case 'substitution': {
         const outgoing = active(action.outgoingIdentificationNumber);
+        if (action.arrival) {
+          registered(action.incomingIdentificationNumber);
+          if (presentPlayers.includes(action.incomingIdentificationNumber))
+            throw new BadRequestException('El jugador ya llegó. Selecciónalo desde la reserva actual.');
+          presentPlayers.push(action.incomingIdentificationNumber);
+        }
         reserve(action.incomingIdentificationNumber);
         entries = entries.map((entry) => entry === outgoing ? {
           ...entry, identificationNumber: action.incomingIdentificationNumber,
@@ -1377,8 +2619,10 @@ export class OfficialScoringService {
       }
       case 'defense': {
         const player = active(action.identificationNumber);
-        const swap = ['DH', 'NA'].includes(action.fieldPosition) ? undefined :
+        const swap = action.swapWith ? active(action.swapWith) : ['DH', 'NA'].includes(action.fieldPosition) ? undefined :
           entries.find((entry) => entry !== player && entry.fieldPosition === action.fieldPosition);
+        if (action.swapWith && (swap === player || swap?.fieldPosition !== action.fieldPosition))
+          throw new BadRequestException('El otro jugador cambió de posición. Actualiza la hoja antes del intercambio.');
         entries = entries.map((entry) => entry === player ? { ...entry, fieldPosition: action.fieldPosition } :
           entry === swap ? { ...entry, fieldPosition: player.fieldPosition } : entry);
         break;
@@ -1394,6 +2638,7 @@ export class OfficialScoringService {
         break;
       }
       case 'staff-arrival':
+        this.assertTeamStaffCompatible(tournament, [action.official]);
         if (presentOfficials.some((official) => official.role === action.official.role && official.identificationNumber === action.official.identificationNumber)) {
           throw new BadRequestException('Este directivo ya está registrado como presente en ese cargo.');
         }
@@ -1407,6 +2652,8 @@ export class OfficialScoringService {
         break;
     }
     const lineupEntries = this.sanitizeLineupEntries(entries.map((entry) => ({ ...entry, jerseyNumber: entry.jerseyNumber ?? undefined })), [], 'alineación');
+    const sizeError = lineupSizeError(sheet.initialLineup, lineupEntries);
+    if (sizeError) throw new BadRequestException(sizeError);
     lineupEntries.forEach((entry) => registered(entry.identificationNumber));
     return { lineupEntries, presentPlayers, presentOfficials };
   }
@@ -1422,7 +2669,7 @@ export class OfficialScoringService {
       if (!entry || typeof entry !== 'object' || !('role' in entry) || !('identificationNumber' in entry) || !('displayName' in entry)) {
         throw new BadRequestException('Indica cargo, cédula y nombre del directivo presente.');
       }
-      if (entry.role !== 'DIRIGENTE' && entry.role !== 'MANAGER' && entry.role !== 'DELEGADO') {
+      if (!isPresentOfficialRole(entry.role)) {
         throw new BadRequestException('Solo se incluyen dirigente, manager y delegados; no los coach de primera y tercera.');
       }
       return {
@@ -1439,17 +2686,26 @@ export class OfficialScoringService {
 
   private sanitizePersonnelAction(value: unknown): PersonnelAction {
     if (!value || typeof value !== 'object' || !('kind' in value)) throw new BadRequestException('Indica el movimiento de personal.');
+    if ((value.kind === 'substitution' || value.kind === 'defense') && ('battingOrder' in value || 'order' in value)) {
+      throw new BadRequestException('El orden de bateo es fijo: el suplente hereda el turno del jugador saliente y los cambios defensivos no lo modifican.');
+    }
     const text = (key: string) => this.personnelText(key in value ? Reflect.get(value, key) : undefined, key);
     const id = (key: string) => this.normalizeIdentificationNumber(text(key), 'cédula');
+    if ('arrival' in value && (value.kind !== 'substitution' || value.arrival !== true))
+      throw new BadRequestException('La llegada conjunta solo admite una sustitución con arrival: true.');
+    if ('swapWith' in value && value.kind !== 'defense')
+      throw new BadRequestException('El intercambio de jugadores solo corresponde a un cambio defensivo.');
     switch (value.kind) {
       case 'arrival': return { kind: 'arrival', identificationNumber: id('identificationNumber') };
       case 'substitution': return {
         kind: 'substitution', outgoingIdentificationNumber: id('outgoingIdentificationNumber'),
         incomingIdentificationNumber: id('incomingIdentificationNumber'),
         fieldPosition: this.normalizeFieldPosition(text('fieldPosition'), 'posición'),
-        jerseyNumber: this.normalizeJerseyNumber(text('jerseyNumber'), 'camiseta')
+        jerseyNumber: this.normalizeJerseyNumber(text('jerseyNumber'), 'camiseta'),
+        ...('arrival' in value ? { arrival: true } : {})
       };
-      case 'defense': return { kind: 'defense', identificationNumber: id('identificationNumber'), fieldPosition: this.normalizeFieldPosition(text('fieldPosition'), 'posición') };
+      case 'defense': return { kind: 'defense', identificationNumber: id('identificationNumber'), fieldPosition: this.normalizeFieldPosition(text('fieldPosition'), 'posición'),
+        ...('swapWith' in value ? { swapWith: id('swapWith') } : {}) };
       case 'courtesy': return {
         kind: 'courtesy', fromBase: this.requireIntegerRange('fromBase' in value && typeof value.fromBase === 'number' ? value.fromBase : NaN, 'base', 1, 3),
         outgoingIdentificationNumber: id('outgoingIdentificationNumber'), incomingIdentificationNumber: id('incomingIdentificationNumber')
@@ -1457,7 +2713,7 @@ export class OfficialScoringService {
       case 'staff-arrival': return { kind: 'staff-arrival', official: this.sanitizePresentOfficials(['official' in value ? value.official : null])[0] };
       case 'staff-departure': {
         const role = text('role');
-        if (role !== 'DIRIGENTE' && role !== 'MANAGER' && role !== 'DELEGADO') throw new BadRequestException('Cargo de directivo inválido.');
+        if (!isPresentOfficialRole(role)) throw new BadRequestException('Cargo de personal inválido.');
         return { kind: 'staff-departure', identificationNumber: id('identificationNumber'), role };
       }
       default: throw new BadRequestException('Movimiento de personal no permitido.');
@@ -1465,6 +2721,7 @@ export class OfficialScoringService {
   }
 
   private assertPersonnelOpen(game: OfficialGameRecord) {
+    this.assertProtestUnlocked(game);
     if (game.officialState.status === 'final') throw new BadRequestException('No se permite modificar el personal de un juego finalizado.');
   }
 
@@ -1473,8 +2730,8 @@ export class OfficialScoringService {
       ...game.officialState, officialVersion: game.officialState.officialVersion + 1, updatedAt: this.nowIso()
     };
     game.personnelVersion += 1;
-    this.personnelStreams.get(game.gameId)?.next();
-    this.getOrCreateStream(game.gameId).next({
+    this.emitPersonnel(game.gameId);
+    this.emitGameEvent(game.gameId, {
       kind: 'snapshot', gameId: game.gameId, tournamentId: game.tournamentId,
       state: game.officialState, authorization: this.serializeGameAuthorization(game, tournament),
       lineup: this.serializeLineupStatus(game, tournament), playByPlay: this.serializePlayByPlay(game, tournament)
@@ -1503,6 +2760,7 @@ export class OfficialScoringService {
       role,
       canReadOfficial: true,
       canOfficialWrite,
+      scoringBlockReason: canOfficialWrite ? this.scoringBlockReason(gameId, userId) : null,
       canPrivateWrite,
       canSubmitLineup: role === 'manager' && managerTeams.length > 0,
       canRegisterPlayers: role === 'organizer',
@@ -1512,6 +2770,7 @@ export class OfficialScoringService {
     } as const;
   }
 
+  @OfficialMutation
   submitOfficialUpdate(command: OfficialUpdateCommand) {
     const gameId = this.requireText(command.gameId, 'gameId');
     const tournamentId = this.requireText(command.tournamentId, 'tournamentId');
@@ -1523,7 +2782,7 @@ export class OfficialScoringService {
     const game = {
       ...stored, officialState: structuredClone(stored.officialState),
       lineups: structuredClone(stored.lineups), playByPlay: structuredClone(stored.playByPlay),
-      events: [...stored.events], scoringHistory: [...stored.scoringHistory]
+      events: [...stored.events], scoringHistory: [...stored.scoringHistory], scoringActors: new Set(stored.scoringActors)
     };
 
     if (!this.canWriteOfficial(game, tournament, actorId, actorRole)) {
@@ -1531,17 +2790,22 @@ export class OfficialScoringService {
         'No autorizado para anotacion oficial. Solo organizador o anotadores autorizados pueden publicar el resultado legal.'
       );
     }
+    this.assertProtestUnlocked(game);
+    this.assertScoringAvailable(game, actorId);
+    if (game.officialState.status === 'scheduled' && game.teams) for (const teamId of [game.teams.homeTeamId, game.teams.awayTeamId])
+      this.tournamentPlanning?.assertParticipation(tournamentId, gameId, teamId,
+        game.lineups.get(teamId)?.lineupEntries.map(entry => entry.identificationNumber) ?? [], 'play');
     if (command.expectedOfficialVersion !== undefined && command.expectedOfficialVersion !== game.officialState.officialVersion) {
       throw new ConflictException('La pizarra oficial cambió. Recárgala antes de anotar.');
     }
     const scorecardOperation = command.scorecardCommand !== undefined || command.undoLast !== undefined ||
-      command.regulationInnings !== undefined || command.lastErrorOuts !== undefined;
+      command.regulationInnings !== undefined || command.lastErrorOuts !== undefined || command.clockAction !== undefined;
     if (scorecardOperation && command.expectedOfficialVersion === undefined) {
       throw new BadRequestException('La anotación requiere la versión actual de la pizarra.');
     }
     if (scorecardOperation && (command.playEvent || command.plateAppearance || command.runReview ||
         Object.keys(command.patch ?? {}).length ||
-        [command.scorecardCommand, command.undoLast, command.regulationInnings, command.lastErrorOuts].filter((v) => v !== undefined).length !== 1)) {
+        [command.scorecardCommand, command.undoLast, command.regulationInnings, command.lastErrorOuts, command.clockAction].filter((v) => v !== undefined).length !== 1)) {
       throw new BadRequestException('Envía una sola operación oficial por vez.');
     }
     const before = {
@@ -1550,6 +2814,8 @@ export class OfficialScoringService {
     };
     const restore = (entry: typeof before) => {
       game.officialState = { ...structuredClone(entry.state), officialVersion: stored.officialState.officialVersion };
+      if (stored.officialState.clock) game.officialState.clock = structuredClone(stored.officialState.clock);
+      else delete game.officialState.clock;
       game.playByPlay = structuredClone(entry.playByPlay);
       for (const [id, index] of entry.indexes) {
         const lineup = game.lineups.get(id);
@@ -1557,6 +2823,19 @@ export class OfficialScoringService {
       }
     };
     let scorecardCommand: PrivateCommand | undefined;
+    if (command.clockAction !== undefined) {
+      if (!isGameClockAction(command.clockAction)) throw new BadRequestException('La operación del cronómetro no es válida.');
+      if (game.officialState.status === 'final') throw new ConflictException('El tiempo de un partido finalizado no se modifica.');
+      if (!game.teams || !game.lineups.get(game.teams.homeTeamId)?.lineupEntries.length ||
+          !game.lineups.get(game.teams.awayTeamId)?.lineupEntries.length) {
+        throw new ConflictException('Ambos managers deben entregar su lineup antes de iniciar el tiempo.');
+      }
+      try { game.officialState.clock = changeGameClock(game.officialState.clock, command.clockAction, this.nowIso()); }
+      catch (error) {
+        if (!(error instanceof Error)) throw error;
+        throw new BadRequestException(error.message);
+      }
+    }
     if (command.undoLast !== undefined) {
       if (command.undoLast !== true) throw new BadRequestException('Indica deshacer la última anotación.');
       const previous = game.scoringHistory.pop();
@@ -1580,11 +2859,14 @@ export class OfficialScoringService {
       if (![7, 9].includes(command.regulationInnings) || game.officialState.status === 'final') {
         throw new BadRequestException('Define siete o nueve entradas antes de cerrar el partido.');
       }
+      if (isSoftballScorecard(this.serializeScorecard(game, tournament).seed) && game.regulationInnings !== command.regulationInnings &&
+          game.officialState.inning > Math.min(game.regulationInnings ?? 7, command.regulationInnings))
+        throw new BadRequestException('La duración no se puede cambiar después de alcanzar las entradas extra.');
       game.regulationInnings = command.regulationInnings;
     }
     if (command.scorecardCommand !== undefined) {
       if (!isScorecardCommand(command.scorecardCommand) || command.scorecardCommand.sharedRequestId ||
-          !['pitch', 'play', 'runner', 'misplay', 'courtesy', 'finish', 'run-review'].includes(command.scorecardCommand.kind)) {
+          !['pitch', 'play', 'runner', 'misplay', 'courtesy', 'finish', 'run-review', 'rules'].includes(command.scorecardCommand.kind)) {
         throw new BadRequestException('La jugada oficial contiene datos inválidos.');
       }
       scorecardCommand = command.scorecardCommand;
@@ -1598,7 +2880,8 @@ export class OfficialScoringService {
       if (!current.lineups.home.length || !current.lineups.away.length) {
         throw new BadRequestException('Ambos managers deben entregar su lineup antes de anotar el partido.');
       }
-      if (scorecardCommand.kind === 'play' && scorecardCommand.destinations === undefined) {
+      if (scorecardCommand.kind === 'play' && scorecardCommand.destinations === undefined &&
+          scorecardCommand.result !== 'fieldersChoice') {
         scorecardCommand = { ...scorecardCommand, destinations: minimumDestinations(current, scorecardCommand.result) };
       }
       if (scorecardCommand.kind === 'courtesy') {
@@ -1608,7 +2891,13 @@ export class OfficialScoringService {
         }
         scorecardCommand = { ...scorecardCommand, sourceRule: tournament.courtesyRunnerSource };
       }
-      try { preview = applyPrivateCommand(current, scorecardCommand); }
+      try {
+        assertScoringSubmission(current, scorecardCommand);
+        preview = applyPrivateCommand(current, scorecardCommand);
+        if (scorecardCommand.kind === 'rules') game.playByPlay.scorecardLog = preview.log;
+        if (scorecardCommand.kind === 'finish' && scorecardCommand.review)
+          game.playByPlay.finalReview = structuredClone(scorecardCommand.review);
+      }
       catch (error) {
         if (!(error instanceof Error)) throw error;
         throw new BadRequestException(error.message);
@@ -1627,6 +2916,7 @@ export class OfficialScoringService {
 
     let patch: OfficialScoringPatch = {
       ...(command.patch ?? {}),
+      ...(command.clockAction === 'start' || command.clockAction === 'resume' ? { status: 'in_progress' as const } : {}),
       ...(scorecardCommand?.kind === 'finish' ? { status: 'final' as const, lastPlay: 'Partido finalizado oficialmente' } : {}),
       ...(command.undoLast ? { lastPlay: 'Última anotación oficial deshecha' } : {})
     };
@@ -1681,8 +2971,45 @@ export class OfficialScoringService {
       };
     }
 
+    const newScoring = command.scorecardCommand !== undefined && scorecardCommand && isTimedScoringCommand(scorecardCommand) ||
+      command.playEvent && playEventResult?.type !== 'COURTESY_RUNNER' || command.plateAppearance;
+    if (newScoring) {
+      try { game.officialState.clock = startOrResumeGameClock(game.officialState.clock, this.nowIso()); }
+      catch (error) {
+        if (!(error instanceof Error)) throw error;
+        throw new BadRequestException(error.message);
+      }
+    }
     const nextState = this.applyPatch(game, game.officialState, patch, actorId, actorRole);
+    if (nextState.status === 'in_progress' || newScoring) {
+      const capacity = this.tournamentPlanning?.organizerCapacity?.(tournamentId);
+      if (capacity && !capacity.legacy) {
+        const doc = this.tournamentPlanning?.document(tournamentId);
+        const fixture = doc?.fixtures.find(item => this.plannedGameId(tournamentId, item.id) === gameId);
+        if (!doc || !fixture || !game.teams) throw new ConflictException('Falta el cruce oficial para validar la capacidad del torneo.');
+        if (!this.tieBreakerReady(doc, fixture.phaseId)) throw new ConflictException('El desempate requiere justificación y una fase de origen concluida con sus partidos finalizados.');
+        this.organizerCapacity.start(capacity.accountId, doc, { gameId, fixtureId: fixture.id,
+          teamIds: [game.teams.homeTeamId, game.teams.awayTeamId], at: nextState.updatedAt });
+      }
+    }
+    if (!game.operationStartedAt && nextState.status === 'in_progress')
+      game.operationStartedAt = stored.officialState.status === 'in_progress' ? stored.officialState.updatedAt : nextState.updatedAt;
+    if (game.scorekeeperSubstitutions) (game.scorekeeperSubstitutions.movements ??= []).push({
+      version: nextState.officialVersion, actorId, role: actorRole, at: nextState.updatedAt,
+      action: scorecardCommand ? scorecardCommand.kind === 'play' ? `play:${scorecardCommand.result}` : scorecardCommand.kind :
+        command.undoLast ? 'undo' : command.clockAction ? 'clock' : 'update'
+    });
+    const identity = this.requireActorIdentity(actorId);
+    const availabilityChanged = stored.officialState.status !== nextState.status ||
+      nextState.status === 'in_progress' && !stored.scoringActors.has(identity);
+    this.observeRosterClosure(tournamentId, gameId, nextState.status);
+    if (nextState.status === 'in_progress') game.scoringActors.add(identity);
+    else game.scoringActors.clear();
     game.officialState = nextState;
+    if (nextState.status === 'final' && stored.officialState.status !== 'final') game.chatFinishedAt = nextState.updatedAt;
+    else if (nextState.status !== 'final') game.chatFinishedAt = null;
+    game.hasStarted ||= ['in_progress', 'final', 'protested'].includes(nextState.status);
+    if (game.hasStarted) game.replacementPending = false;
     if (scorecardCommand || command.playEvent || command.plateAppearance || command.runReview || !scorecardOperation) {
       game.scoringHistory.push({ ...before, command: scorecardCommand });
       if (command.lastErrorOuts !== undefined) {
@@ -1714,13 +3041,15 @@ export class OfficialScoringService {
 
     game.events.push(event);
     Object.assign(stored, game);
-    this.getOrCreateStream(gameId).next(event);
+    if (availabilityChanged) this.publishScoringAvailability();
+    this.emitGameEvent(gameId, event);
 
     return {
       status: 'ok',
       mode: 'official',
       gameId,
       tournamentId,
+      ...(nextState.clock ? { serverTime: this.nowIso() } : {}),
       state: nextState,
       plateAppearance: plateAppearanceResult,
       playEvent: playEventResult,
@@ -1737,10 +3066,41 @@ export class OfficialScoringService {
     return {
       gameId: game.gameId,
       tournamentId: game.tournamentId,
+      ...(game.officialState.clock ? { serverTime: this.nowIso() } : {}),
       state: game.officialState,
       lineup: this.serializeLineupStatus(game, tournament),
       playByPlay: this.serializePlayByPlay(game, tournament)
     };
+  }
+
+  gameReport(gameIdRaw: string, tournamentIdRaw: string, detailed: boolean) {
+    const tournamentId = this.requireText(tournamentIdRaw, 'tournamentId');
+    const tournament = this.getTournamentOrThrow(tournamentId);
+    const game = this.games.get(this.requireText(gameIdRaw, 'gameId'));
+    if (!game || game.tournamentId !== tournamentId) throw new NotFoundException('El partido no existe en este torneo.');
+    const state = this.serializeScorecard(game, tournament);
+    const doc = this.tournamentPlanning?.document(tournamentId);
+    const rule = doc?.customRules.find(item => item.name.trim().toLowerCase() === 'base del pcl');
+    if (rule && !['7', '9'].includes(rule.value.trim())) throw new ConflictException('La regla «Base del PCL» del torneo debe indicar 7 o 9.');
+    const eraBase = rule?.value.trim() === '7' ? 7 : rule?.value.trim() === '9' ? 9 : undefined;
+    state.seed.names = {
+      home: game.details?.homeTeamName ?? doc?.teams.find(team => team.id === game.teams?.homeTeamId)?.name ?? state.seed.names.home,
+      away: game.details?.awayTeamName ?? doc?.teams.find(team => team.id === game.teams?.awayTeamId)?.name ?? state.seed.names.away
+    };
+    return createGameReport(state, {
+      source: 'official', detailed, ...(eraBase ? { eraBase } : {}),
+      metadata: { tournament: doc?.name ?? game.details?.tournamentName ?? null,
+        date: game.details?.date ?? null, time: game.details?.time ?? null, venue: game.details?.venue ?? null,
+        revision: game.officialState.officialVersion },
+      sourceComplete: this.statisticsSourceComplete(game, state),
+      ...(game.playByPlay.events.length === game.playByPlay.sequence ? {
+        caughtStealing: new Map([...state.seed.rosters.home, ...state.seed.rosters.away].map(player => [player.id,
+          game.playByPlay.events.filter(event => event.type === 'CAUGHT_STEALING' && event.runnerIdentificationNumber === player.id).length]))
+      } : {}),
+      atBats: new Map(Array.from(game.playByPlay.batterStatsByIdentification, ([id, stats]) => [id, stats.atBats])),
+      pitchingWalks: new Map(Array.from(game.playByPlay.pitcherStatsByIdentification, ([id, stats]) => [id, stats.walksAllowed])),
+      ...(game.teams ? { offenseIds: { home: game.teams.homeTeamId, away: game.teams.awayTeamId } } : {})
+    });
   }
 
   getGamePlayByPlay(gameIdRaw: string, tournamentIdRaw: string, visibilityRaw?: string) {
@@ -1782,6 +3142,63 @@ export class OfficialScoringService {
     });
   }
 
+  private identityCanScore(game: OfficialGameRecord, identity: string) {
+    const tournament = this.getTournamentOrThrow(game.tournamentId);
+    return [tournament.organizerId, ...this.serializeGameAuthorization(game, tournament).effectiveScorekeeperIds]
+      .some(id => this.actorIdentifications.get(id) === identity);
+  }
+
+  private scoringBlockReason(gameId: string, actorId: string): string | null {
+    if (this.games.get(gameId)?.officialState.status === 'suspended') return 'Juego suspendido. Solo el organizador puede reprogramarlo; no admite anotaciones.';
+    if (this.games.get(gameId)?.officialState.protest) return 'La anotación está bloqueada por protesta. Consulta la resolución de mesa técnica.';
+    const plannedGame = this.games.get(gameId);
+    if (plannedGame?.officialState.status === 'scheduled' && plannedGame.teams) {
+      try {
+        for (const teamId of [plannedGame.teams.homeTeamId, plannedGame.teams.awayTeamId])
+          this.tournamentPlanning?.assertParticipation(plannedGame.tournamentId, gameId, teamId,
+            plannedGame.lineups.get(teamId)?.lineupEntries.map(entry => entry.identificationNumber) ?? [], 'play');
+      } catch (error) {
+        if (error instanceof ForbiddenException || error instanceof ConflictException) return error.message;
+        throw error;
+      }
+    }
+    const identity = this.requireActorIdentity(actorId);
+    const active = Array.from(this.games.values()).find(game => game.gameId !== gameId &&
+      game.officialState.status === 'in_progress' && game.scoringActors.has(identity) && this.identityCanScore(game, identity));
+    if (!active) return null;
+    const name = active.details ? `${active.details.awayTeamName} vs. ${active.details.homeTeamName}` : 'otro partido';
+    return `Ya estás anotando ${name}. Finaliza ese partido o solicita al organizador que te releve antes de anotar otro.`;
+  }
+
+  private assertProtestUnlocked(game: OfficialGameRecord) {
+    if (game.officialState.status === 'suspended') throw new ConflictException('Juego suspendido. No se modifican jugadas ni datos hasta su reprogramación por el organizador.');
+    if (game.officialState.protest) throw new ConflictException('El juego está bloqueado por protesta. No permite modificar jugadas, lineups ni datos; la decisión se registra mediante mesa técnica.');
+  }
+
+  private assertScoringAvailable(game: OfficialGameRecord, actorId: string) {
+    const reason = this.scoringBlockReason(game.gameId, actorId);
+    if (reason) throw new ConflictException(reason);
+  }
+
+  private claimScoring(game: OfficialGameRecord, actorId: string) {
+    if (game.officialState.status !== 'in_progress') return;
+    const identity = this.requireActorIdentity(actorId);
+    if (!game.scoringActors.has(identity)) {
+      game.scoringActors.add(identity);
+      this.publishScoringAvailability();
+    }
+  }
+
+  private publishScoringAvailability() {
+    for (const game of this.games.values()) {
+      for (const identity of game.scoringActors) {
+        if (!this.identityCanScore(game, identity)) game.scoringActors.delete(identity);
+      }
+      game.personnelVersion += 1;
+      this.emitPersonnel(game.gameId);
+    }
+  }
+
   private canWriteOfficial(
     game: OfficialGameRecord,
     tournament: TournamentAuthorizationRecord,
@@ -1795,17 +3212,14 @@ export class OfficialScoringService {
     if (role !== 'scorekeeper') {
       return false;
     }
+    if (this.isScorekeeperSubstitute(actorId, game.tournamentId, game.gameId)) return true;
 
     const isTournamentAuthorized = tournament.authorizedScorekeepers.has(actorId);
     if (!isTournamentAuthorized) {
       return false;
     }
 
-    if (!game.hasGameScopedAuthorization) {
-      return true;
-    }
-
-    return game.gameAuthorizedScorekeepers.has(actorId);
+    return game.hasGameScopedAuthorization && game.gameAuthorizedScorekeepers.has(actorId);
   }
 
   private recordPlateAppearance(
@@ -1892,35 +3306,41 @@ export class OfficialScoringService {
   private scorecardPlayEvent(command: PrivateCommand, state: PrivateState): PlayEventInput | undefined {
     const plays: Record<PlayResult, PlayEventType> = {
       single: 'HIT_SINGLE', double: 'HIT_DOUBLE', triple: 'HIT_TRIPLE', homeRun: 'HOME_RUN',
+      intentionalWalk: 'WALK', insideParkHomeRun: 'HOME_RUN', groundRuleDouble: 'HIT_DOUBLE',
+      buntHit: 'HIT_SINGLE', buntOut: 'OUT', droppedThirdStrike: 'STRIKEOUT',
+      sacrificeBuntError: 'ERROR', sacrificeFlyError: 'ERROR', catcherInterference: 'ERROR',
       walk: 'WALK', hitByPitch: 'HIT_BY_PITCH', strikeout: 'STRIKEOUT', groundOut: 'GROUND_OUT',
       flyOut: 'FLY_OUT', lineOut: 'LINE_OUT', battedOut: 'OUT', ruleOut: 'FORCE_OUT',
       sacrificeFly: 'SACRIFICE_FLY', sacrificeBunt: 'BUNT', error: 'ERROR',
       fieldersChoice: 'FORCE_OUT', doublePlay: 'DOUBLE_PLAY', triplePlay: 'TRIPLE_PLAY'
     };
     if (command.kind === 'pitch') return { type: command.value === 'ball' ? 'BALL' : command.value === 'strike' ? 'STRIKE' : 'FOUL' };
-    if (command.kind === 'play') return { type: plays[command.result], errorOuts: command.errorOuts, note: command.note };
-    if (command.kind === 'misplay') return { type: 'DROPPED_FOUL', errorOuts: 1 };
+    if (command.kind === 'play') return { type: command.batterRuleOut ? 'OUT' : command.selectionOuts ? 'DOUBLE_PLAY' : plays[command.result], errorOuts: command.errorOuts, note: command.note,
+      fielderIdentificationNumber: command.caughtBy?.playerId ?? command.errors?.[0]?.playerId };
+    if (command.kind === 'misplay') return { type: 'DROPPED_FOUL', errorOuts: 1, fielderIdentificationNumber: command.errors?.[0]?.playerId };
     if (command.kind === 'courtesy') return { type: 'COURTESY_RUNNER', fromBase: command.from, runnerIdentificationNumber: command.playerId };
     if (command.kind === 'runner') {
       const actions: Record<typeof command.action, PlayEventType> = {
         steal: 'STEAL_BASE', caught: 'CAUGHT_STEALING', pickoff: 'PICKOFF', wild: 'WILD_PITCH',
         passed: 'PASSED_BALL', balk: 'BALK', advance: 'RUNNER_ADVANCE', error: 'ERROR_ADVANCE',
-        run: 'RUN_SCORED', ruleOut: 'RUNNER_OUT', advanceOut: 'RUNNER_OUT'
+        run: 'RUN_SCORED', ruleOut: 'RUNNER_OUT', advanceOut: 'RUNNER_OUT', obstruction: 'ERROR_ADVANCE'
       };
       return { type: actions[command.action], fromBase: command.from,
         runnerIdentificationNumber: state.bases[command.from - 1] ?? undefined,
-        ...(command.to ? { toBase: command.to } : {}), errorOuts: command.errorOuts, note: command.note };
+        ...(command.to ? { toBase: command.to } : {}), errorOuts: command.errorOuts, note: command.note,
+        fielderIdentificationNumber: command.errors?.[0]?.playerId };
     }
     return undefined;
   }
 
   private applyPlayEvent(game: OfficialGameRecord, input: PlayEventInput, preview?: PrivateState): OfficialPlayEventRecord {
+    const previewLog = preview?.log.at(-1);
     if (!game.teams) {
       throw new BadRequestException('Debes definir los equipos del juego antes de registrar jugada a jugada.');
     }
 
     const type = this.requirePlayEventType(input.type);
-    if (!validRunEvidence(input) || input.errorOuts !== undefined && !['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(type)) {
+    if (!validRunEvidence(input) || input.errorOuts !== undefined && !previewLog?.errors?.length && !['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(type)) {
       throw new BadRequestException('Los outs evitados deben ser de cero a tres y corresponden solo a errores defensivos.');
     }
     if (type === 'DROPPED_FOUL' && input.errorOuts !== undefined && input.errorOuts !== 1) {
@@ -1997,6 +3417,12 @@ export class OfficialScoringService {
     const fielderFromInput = input.fielderIdentificationNumber
       ? this.normalizeIdentificationNumber(input.fielderIdentificationNumber, 'playEvent.fielderIdentificationNumber')
       : null;
+    const errorEvent = ['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(type);
+    const errorDefender = game.lineups.get(defenseTeamId)?.lineupEntries.find(entry =>
+      entry.identificationNumber === fielderFromInput && !['NA', 'DH'].includes(entry.fieldPosition));
+    if (errorEvent && !previewLog?.errors?.length && !errorDefender) {
+      throw new BadRequestException('Identifica al defensor responsable del error en la alineación defensiva activa.');
+    }
 
     let batterIdentification = requiresBatter ? expectedBatter : batterFromInput;
     if (requiresBatter && batterFromInput && batterFromInput !== expectedBatter) {
@@ -2227,7 +3653,7 @@ export class OfficialScoringService {
       applyAtBatToBatter = true;
       applyReachedOnErrorToBatter = true;
 
-      if (fielderFromInput) {
+      if (fielderFromInput && !previewLog?.errors?.length) {
         const fieldingStats = this.getOrCreateFieldingStats(game, fielderFromInput);
         fieldingStats.errors += 1;
       }
@@ -2427,7 +3853,7 @@ export class OfficialScoringService {
       }
     } else if (type === 'DROPPED_FOUL') {
       description = `Error en foul que prolonga el turno de ${batterIdentification}.`;
-      if (fielderFromInput) this.getOrCreateFieldingStats(game, fielderFromInput).errors += 1;
+      if (fielderFromInput && !previewLog?.errors?.length) this.getOrCreateFieldingStats(game, fielderFromInput).errors += 1;
     } else if (['WILD_PITCH', 'PASSED_BALL', 'ERROR_ADVANCE', 'RUNNER_ADVANCE'].includes(type)) {
       if (['ERROR_ADVANCE', 'RUNNER_ADVANCE'].includes(type) && !runnerFromInput) {
         throw new BadRequestException('Identifica al corredor para registrar la causa de su avance.');
@@ -2447,8 +3873,9 @@ export class OfficialScoringService {
 
       description = type === 'WILD_PITCH' ? 'Lanzamiento descontrolado con avance de corredores.' :
         type === 'PASSED_BALL' ? 'Bola pasada con avance de corredores.' :
-        type === 'ERROR_ADVANCE' ? 'Avance por error defensivo.' : 'Avance de corredor sin error.';
-      if (type === 'ERROR_ADVANCE' && fielderFromInput) this.getOrCreateFieldingStats(game, fielderFromInput).errors += 1;
+        type === 'ERROR_ADVANCE' ? previewLog?.errors?.some(error => error.type === 'obstruction') ?
+          'Avance por obstrucción defensiva.' : 'Avance por error defensivo.' : 'Avance de corredor sin error.';
+      if (type === 'ERROR_ADVANCE' && fielderFromInput && !previewLog?.errors?.length) this.getOrCreateFieldingStats(game, fielderFromInput).errors += 1;
     } else if (type === 'RUN_SCORED') {
       if (runnerFromInput) {
         const currentBase = fromBase ?? this.findRunnerBase(basesAfter, runnerFromInput);
@@ -2474,14 +3901,15 @@ export class OfficialScoringService {
       throw new BadRequestException(`Tipo de jugada no soportado: ${type}.`);
     }
 
-    const previewLog = preview?.log.at(-1);
+    for (const error of previewLog?.errors ?? []) this.getOrCreateFieldingStats(game, error.playerId).errors += 1;
     if (preview && previewLog) {
-      basesAfter = { first: preview.bases[0], second: preview.bases[1], third: preview.bases[2] };
+      basesAfter = preview.inning !== game.officialState.inning || preview.side !== (offenseTeamId === game.teams.homeTeamId ? 'home' : 'away') ?
+        { first: null, second: null, third: null } : { first: preview.bases[0], second: preview.bases[1], third: preview.bases[2] };
       scoredRunnerIds = previewLog.runs;
       runsScored = previewLog.runs.length;
       outsRecorded = previewLog.outs;
       description = previewLog.text;
-      if (type === 'BUNT') applyAtBatToBatter = false;
+      if (previewLog.result) applyAtBatToBatter = !noAtBatResults.includes(previewLog.result);
       awardRbiToBatter = previewLog.rbis > 0;
     }
     if (runsScored < scoredRunnerIds.length) {
@@ -2534,7 +3962,7 @@ export class OfficialScoringService {
       }
 
       if (awardRbiToBatter && runsScored > 0) {
-        batterStats.rbis += runsScored;
+        batterStats.rbis += previewLog ? previewLog.rbis : runsScored;
       }
     }
 
@@ -2566,7 +3994,7 @@ export class OfficialScoringService {
 
     }
 
-    if (fielderFromInput && outsRecorded > 0) {
+    if (fielderFromInput && outsRecorded > 0 && !previewLog?.errors?.length) {
       const fieldingStats = this.getOrCreateFieldingStats(game, fielderFromInput);
       fieldingStats.outsRecorded += outsRecorded;
     }
@@ -2576,11 +4004,16 @@ export class OfficialScoringService {
       eventId: game.playByPlay.sequence + 1,
       half: `${game.officialState.inning}:${offenseTeamId}`, offenseId: offenseTeamId,
       pitcherId: pitcherFromInput, outsBefore: game.officialState.outs,
-      batterId: batterIdentification, plateCompleted, reachedOnError: type === 'ERROR',
+      batterId: batterIdentification, plateCompleted, reachedOnError: previewLog?.result ?
+        reachedOnErrorResults.includes(previewLog.result) || previewLog.thirdStrikeCause === 'passed' && preview!.bases.includes(batterIdentification) : type === 'ERROR',
       basesBefore: [basesBefore.first, basesBefore.second, basesBefore.third],
       basesAfter: accountedBasesAfter, scored: scoredRunnerIds, totalRuns: runsScored,
-      misplay: ['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(type) ? 'error' : type === 'PASSED_BALL' ? 'passedBall' : undefined,
-      errorOuts: type === 'DROPPED_FOUL' ? 1 : input.errorOuts,
+      misplay: previewLog?.errors?.length || ['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(type) ? 'error' :
+        type === 'PASSED_BALL' || previewLog?.thirdStrikeCause === 'passed' ? 'passedBall' : undefined,
+      errorOuts: previewLog?.result === 'catcherInterference' ? 0 : type === 'DROPPED_FOUL' ? 1 : input.errorOuts,
+      errorSavedRunnerId: previewLog?.errorSavedRunnerId,
+      tieBreakerRunnerId: game.playByPlay.tieBreakerRunner?.runnerId,
+      passedThirdStrike: previewLog?.thirdStrikeCause === 'passed' && Boolean(preview?.bases.includes(batterIdentification)),
       unknownAdvance: type === 'RUN_SCORED',
       homeRun: type === 'HOME_RUN',
       uncertainPlay: ['DOUBLE_PLAY', 'TRIPLE_PLAY', 'FORCE_OUT'].includes(type),
@@ -2629,9 +4062,21 @@ export class OfficialScoringService {
       offenseTeamAfter = preview.side === 'home' ? game.teams!.homeTeamId : game.teams!.awayTeamId;
       game.playByPlay.courtesyFor = preview.courtesyFor;
     }
+    if (inningAfter !== game.officialState.inning || offenseTeamAfter !== offenseTeamId) {
+      const nextHalf = this.serializeScorecard(game, this.getTournamentOrThrow(game.tournamentId));
+      Object.assign(nextHalf, { inning: inningAfter, side: offenseTeamAfter === game.teams.homeTeamId ? 'home' : 'away',
+        outs: outsAfter, balls: ballsAfter, strikes: strikesAfter,
+        scores: { home: homeScoreAfter, away: awayScoreAfter }, bases: [null, null, null] });
+      placeSoftballTieBreakerRunner(nextHalf, offenseTeamAfter);
+      game.playByPlay.runAccounting = nextHalf.runAccounting;
+      basesAfter = { first: nextHalf.bases[0], second: nextHalf.bases[1], third: nextHalf.bases[2] };
+      game.playByPlay.tieBreakerRunner = nextHalf.tieBreakerRunner;
+      if (nextHalf.tieBreakerRunner && !preview) description += ` · ${softballTieBreakerNotice(nextHalf)}`;
+    }
 
     const note = this.normalizeOptionalText(input.note);
 
+    if (previewLog?.fieldingSequence) description += ` · vía ${previewLog.fieldingSequence.join('-')}`;
     game.playByPlay.baseRunners = basesAfter;
     game.playByPlay.sequence += 1;
 
@@ -2646,6 +4091,14 @@ export class OfficialScoringService {
       pitcherIdentificationNumber: pitcherFromInput,
       runnerIdentificationNumber: runnerFromInput,
       fielderIdentificationNumber: fielderFromInput,
+      ...(errorEvent && errorDefender ? { fielderPosition: errorDefender.fieldPosition } : {}),
+      ...(previewLog?.strikeoutType ? { strikeoutType: previewLog.strikeoutType } : {}),
+      ...(previewLog?.battedBallType ? { battedBallType: previewLog.battedBallType } : {}),
+      ...(previewLog?.fieldingSequence ? { fieldingSequence: [...previewLog.fieldingSequence] } : {}),
+      ...(previewLog?.caughtBy ? { caughtBy: { ...previewLog.caughtBy } } : {}),
+      ...(previewLog?.infieldFly ? { infieldFly: true as const } : {}),
+      ...(previewLog?.batterRuleOut ? { batterRuleOut: structuredClone(previewLog.batterRuleOut) } : {}),
+      ...(previewLog?.ruleOut ? { ruleOut: structuredClone(previewLog.ruleOut) } : {}),
       fromBase,
       toBase,
       runsScored,
@@ -2677,8 +4130,11 @@ export class OfficialScoringService {
       pitch: type === 'BALL' ? 'ball' : type === 'STRIKE' ? 'strike' : type === 'FOUL' ? 'foul' : null,
       text: description, runs: scoredRunnerIds, outs: outsRecorded,
       stolenBy: type === 'STEAL_BASE' ? runnerFromInput : null,
-      rbis: awardRbiToBatter ? runsScored : 0, pitcherId: pitcherFromInput
+      rbis: awardRbiToBatter ? runsScored : 0, pitcherId: pitcherFromInput,
+      ...(errorEvent ? { legacyError: { playerId: fielderFromInput, position: errorDefender?.fieldPosition ?? null } } : {})
     });
+    if (game.playByPlay.tieBreakerRunner && (inningAfter !== game.officialState.inning || offenseTeamAfter !== offenseTeamId))
+      game.playByPlay.scorecardLog.at(-1)!.tieBreakerRunner = { ...game.playByPlay.tieBreakerRunner };
     if (plateCompleted && batterIdentification) {
       this.recordPlateAppearance(game, {
         inning: eventRecord.inning,
@@ -2753,6 +4209,7 @@ export class OfficialScoringService {
     if (!['scheduled', 'in_progress', 'final'].includes(next.status)) {
       throw new BadRequestException('status debe ser scheduled, in_progress o final.');
     }
+    if (next.status === 'final' && next.clock) next.clock = pauseGameClock(next.clock, next.updatedAt);
 
     return next;
   }
@@ -2778,10 +4235,11 @@ export class OfficialScoringService {
       );
     }
 
+    this.refreshDirectRosterMembers(tournament);
     return tournament;
   }
 
-  private getOrCreateGame(gameIdRaw: string, tournamentIdRaw: string) {
+  private getOrCreateGame(gameIdRaw: string, tournamentIdRaw: string): OfficialGameRecord {
     const gameId = this.requireText(gameIdRaw, 'gameId');
     const tournamentId = this.requireText(tournamentIdRaw, 'tournamentId');
 
@@ -2793,10 +4251,17 @@ export class OfficialScoringService {
         );
       }
 
+      existing.softballTieBreakerFromInning ??= Math.max((existing.regulationInnings ?? 7) + 1, existing.officialState.inning + 1);
       return existing;
     }
 
+    if (this.persistentStore && !this.mutationDepth)
+      return this.runOfficialMutation(() => this.getOrCreateGame(gameId, tournamentId));
     const newGame: OfficialGameRecord = {
+      softballTieBreakerFromInning: 8,
+      suspensionArchives: [],
+      scoringActors: new Set<string>(),
+      hasStarted: false,
       scoringHistory: [],
       gameId,
       tournamentId,
@@ -2808,6 +4273,7 @@ export class OfficialScoringService {
       teamSheets: new Map(),
       personnelRequests: [],
       personnelVersion: 0,
+      details: null,
       officialState: {
         inning: 1,
         outs: 0,
@@ -2824,7 +4290,16 @@ export class OfficialScoringService {
         updatedAt: this.nowIso(),
         updatedBy: null
       },
-      playByPlay: {
+      playByPlay: this.emptyPlayByPlay(),
+      events: []
+    };
+
+    this.games.set(gameId, newGame);
+    return newGame;
+  }
+
+  private emptyPlayByPlay(): PlayByPlayRecord {
+    return {
         scorecardLog: [],
         courtesyFor: {},
         sequence: 0,
@@ -2840,12 +4315,7 @@ export class OfficialScoringService {
         fieldingStatsByIdentification: new Map<string, FieldingStatsRecord>(),
         events: [],
         runAccounting: createRunAccounting()
-      },
-      events: []
-    };
-
-    this.games.set(gameId, newGame);
-    return newGame;
+      };
   }
 
   private serializeTournamentAuthorization(record: TournamentAuthorizationRecord) {
@@ -2865,7 +4335,8 @@ export class OfficialScoringService {
   private serializeGameAuthorization(game: OfficialGameRecord, tournament: TournamentAuthorizationRecord) {
     const tournamentIds = Array.from(tournament.authorizedScorekeepers.values());
     const gameScopedIds = Array.from(game.gameAuthorizedScorekeepers.values());
-    const effectiveIds = game.hasGameScopedAuthorization ? gameScopedIds : tournamentIds;
+    const effectiveIds = [...new Set([...(game.hasGameScopedAuthorization ? gameScopedIds.filter(id => tournament.authorizedScorekeepers.has(id)) : []),
+      ...(game.scorekeeperSubstitutions?.members.filter(member => member.status === 'granted').map(member => member.actorId) ?? [])])];
 
     return {
       gameId: game.gameId,
@@ -2967,22 +4438,60 @@ export class OfficialScoringService {
           id, name: this.globalPlayersByIdentification.get(id)?.displayName ?? id, order: null, position: 'NA', jersey: ''
         });
     };
+    const participants = (teamId: string | undefined): PrivatePlayer[] => {
+      const known = new Map(players(teamId, true).map(player => [player.id, player]));
+      for (const request of game.personnelRequests.filter(item => item.teamId === teamId && item.status === 'approved')) {
+        const action = request.action;
+        if (action.kind === 'substitution') {
+          const incoming = roster(teamId).find(player => player.id === action.incomingIdentificationNumber);
+          if (incoming) known.set(incoming.id, { ...incoming,
+            order: known.get(action.outgoingIdentificationNumber)?.order ?? null,
+            position: action.fieldPosition, jersey: action.jerseyNumber });
+        } else if (action.kind === 'courtesy') {
+          const incoming = roster(teamId).find(player => player.id === action.incomingIdentificationNumber);
+          if (incoming && !known.has(incoming.id)) known.set(incoming.id, incoming);
+        }
+      }
+      for (const player of players(teamId)) known.set(player.id, player);
+      return [...known.values()];
+    };
+    const document = this.tournamentPlanning?.document(game.tournamentId);
+    const declaredRules = document ? declaredScoringRules(document.sport, document.modality) : undefined;
+    const log = structuredClone(game.playByPlay.scorecardLog);
+    const events = new Map(game.playByPlay.events.map(event => [event.sequence, event]));
+    let sequence = 0;
+    for (const entry of log) {
+      if (entry.scoringRules) continue;
+      const event = events.get(++sequence);
+      if (!entry.errors?.length && event && ['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(event.type)) {
+        entry.legacyError = { playerId: event.fielderIdentificationNumber, position: event.fielderPosition ?? null };
+      }
+    }
     return {
       seed: {
         names: { home: home ?? 'Local', away: away ?? 'Visitante' },
         lineups: { home: players(home, true), away: players(away, true) },
         rosters: { home: roster(home), away: roster(away) },
         courtesyRunnerSource: tournament.courtesyRunnerSource,
-        regulationInnings: game.regulationInnings
+        regulationInnings: game.regulationInnings,
+        softballTieBreakerFromInning: game.softballTieBreakerFromInning ??
+          Math.max((game.regulationInnings ?? 7) + 1, game.officialState.inning + 1),
+        scoringRules: [...game.playByPlay.scorecardLog].reverse().find(entry => entry.scoringRules)?.scoringRules ?? declaredRules,
+        ...(declaredRules ? { sport: declaredRules === 'baseball' ? 'baseball' as const : 'softball' as const } : {})
       },
       lineups: { home: players(home), away: players(away) },
+      participants: { home: participants(home), away: participants(away) },
       inning: game.officialState.inning, side: game.officialState.offenseTeamId === home ? 'home' : 'away',
       balls: game.officialState.balls, strikes: game.officialState.strikes, outs: game.officialState.outs,
       scores: { home: game.officialState.homeScore, away: game.officialState.awayScore },
       indexes: { home: home ? game.lineups.get(home)?.currentBatterIndex ?? 0 : 0, away: away ? game.lineups.get(away)?.currentBatterIndex ?? 0 : 0 },
       bases: [game.playByPlay.baseRunners.first, game.playByPlay.baseRunners.second, game.playByPlay.baseRunners.third],
-      courtesyFor: structuredClone(game.playByPlay.courtesyFor), log: structuredClone(game.playByPlay.scorecardLog),
-      finished: game.officialState.status === 'final', runAccounting: structuredClone(game.playByPlay.runAccounting)
+      courtesyFor: structuredClone(game.playByPlay.courtesyFor), log,
+      ...(game.playByPlay.events.length < game.playByPlay.sequence ? { fieldingIncomplete: true as const } : {}),
+      finished: game.officialState.status === 'final', runAccounting: structuredClone(game.playByPlay.runAccounting),
+      ...(game.playByPlay.finalReview ? { finalReview: structuredClone(game.playByPlay.finalReview) } : {}),
+      ...(game.playByPlay.tieBreakerRunner ? { tieBreakerRunner: structuredClone(game.playByPlay.tieBreakerRunner) } : {}),
+      ...(game.officialState.clock ? { clock: structuredClone(game.officialState.clock) } : {})
     };
   }
 
@@ -3034,6 +4543,32 @@ export class OfficialScoringService {
         };
       });
 
+    const scoringLog = game.playByPlay.scorecardLog.filter(entry => !entry.scoringRules);
+    const fieldingErrors: PlayByPlayProjection['fieldingErrors'] = scoringLog.flatMap((entry, index) => {
+      const errors = entry.errors?.length ? entry.errors : entry.legacyError?.playerId ?
+        [{ playerId: entry.legacyError.playerId, position: entry.legacyError.position, type: null }] : [];
+      return errors.map((error, errorIndex) => ({
+        sequence: index + 1,
+        inning: entry.inning,
+        defenseTeamId: game.teams ? entry.side === 'away' ? game.teams.homeTeamId : game.teams.awayTeamId : null,
+        fielderIdentificationNumber: error.playerId,
+        errorIndex: errorIndex + 1,
+        position: error.position,
+        type: error.type,
+        description: entry.text
+      }));
+    });
+    for (const event of game.playByPlay.events) {
+      if (scoringLog[event.sequence - 1]?.errors?.length || scoringLog[event.sequence - 1]?.legacyError?.playerId ||
+          !['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(event.type) || !event.fielderIdentificationNumber) continue;
+      fieldingErrors.push({
+        sequence: event.sequence, inning: event.inning, defenseTeamId: event.defenseTeamId,
+        fielderIdentificationNumber: event.fielderIdentificationNumber, errorIndex: 1,
+        position: event.fielderPosition ?? null, type: null, description: event.description
+      });
+    }
+    fieldingErrors.sort((left, right) => left.sequence - right.sequence || left.errorIndex - right.errorIndex);
+
     return {
       scorecard: this.serializeScorecard(game, tournament),
       canUndo: game.scoringHistory.length > 0,
@@ -3054,18 +4589,7 @@ export class OfficialScoringService {
       plateAppearances: game.playByPlay.plateAppearances.map((plateAppearance) => ({
         ...plateAppearance
       })),
-      fieldingErrors: game.playByPlay.events
-        .filter(
-          (event): event is OfficialPlayEventRecord & { fielderIdentificationNumber: string } =>
-            ['ERROR', 'ERROR_ADVANCE', 'DROPPED_FOUL'].includes(event.type) && Boolean(event.fielderIdentificationNumber)
-        )
-        .map((event) => ({
-          sequence: event.sequence,
-          inning: event.inning,
-          defenseTeamId: event.defenseTeamId,
-          fielderIdentificationNumber: event.fielderIdentificationNumber,
-          description: event.description
-        })),
+      fieldingErrors,
       batterStats,
       pitcherStats,
       fieldingStats
@@ -3555,18 +5079,77 @@ export class OfficialScoringService {
   private assertManagerSingleTeamPerTournament(
     tournament: TournamentAuthorizationRecord,
     teamId: string,
-    managerId: string
+    managerId: string,
+    managerIdentification: string
   ) {
     for (const [otherTeamId, roster] of tournament.teamRosters.entries()) {
       if (otherTeamId === teamId) {
         continue;
       }
 
-      if (roster.managerId === managerId) {
+      if (this.requireActorIdentity(roster.managerId) === managerIdentification) {
         throw new BadRequestException(
           `El manager ${managerId} ya dirige el equipo ${otherTeamId} en este torneo. Puede dirigir otros equipos solo en torneos distintos.`
         );
       }
+    }
+  }
+
+  private prepareActorIdentity(pending: Map<string, string>, actorId: string, input?: string) {
+    const existing = pending.get(actorId) ?? this.actorIdentifications.get(actorId);
+    if (input === undefined) {
+      if (!existing) throw new BadRequestException(`Debes vincular una cédula a la cuenta ${actorId} antes de asignarle un rol en el torneo.`);
+      return existing;
+    }
+    const identification = this.normalizeIdentificationNumber(input, 'cédula de la cuenta');
+    if (existing && existing !== identification) {
+      throw new ConflictException('La cuenta ya está vinculada a otra cédula. No puedes cambiar su identidad para eludir la incompatibilidad.');
+    }
+    pending.set(actorId, identification);
+    return identification;
+  }
+
+  private commitActorIdentities(pending: Map<string, string>) {
+    for (const [actorId, identification] of pending) this.actorIdentifications.set(actorId, identification);
+  }
+
+  private requireActorIdentity(actorId: string) {
+    const identification = this.actorIdentifications.get(actorId);
+    if (!identification) throw new ConflictException('La cuenta no tiene una identidad vinculada. No se puede validar su participación.');
+    return identification;
+  }
+
+  private scorekeeperIdentityInputs(input: TournamentAuthorizationCommand['scorekeeperIdentities'], allowedIds: string[]) {
+    const result = new Map<string, string>();
+    if (input === undefined) return result;
+    if (!Array.isArray(input)) throw new BadRequestException('Las identidades de anotadores deben enviarse como una lista.');
+    for (const entry of input) {
+      if (!entry || typeof entry !== 'object') throw new BadRequestException('Cada anotador debe indicar cuenta y cédula.');
+      const actorId = this.requireText(entry.actorId, 'cuenta del anotador');
+      if (!allowedIds.includes(actorId) || result.has(actorId)) throw new BadRequestException('Las identidades deben corresponder a anotadores solicitados y no pueden repetirse.');
+      result.set(actorId, this.normalizeIdentificationNumber(entry.identificationNumber, 'cédula del anotador'));
+    }
+    return result;
+  }
+
+  private assertRoleCompatible(tournament: TournamentAuthorizationRecord, identification: string, group: 'official' | 'participant') {
+    const conflicting = group === 'official' ? tournament.participantIdentifications : tournament.officialIdentifications;
+    if (conflicting.has(identification)) {
+      throw new ConflictException(group === 'official' ?
+        'Incompatibilidad de roles: esta persona ya fue jugador o manager en este torneo y no puede ser anotador ni organizador.' :
+        'Incompatibilidad de roles: esta persona ya fue organizador o anotador en este torneo y no puede ser jugador ni manager.');
+    }
+  }
+
+  private assertTeamStaffCompatible(tournament: TournamentAuthorizationRecord, officials: PresentOfficial[]) {
+    for (const official of officials) {
+      if (official.role !== 'DELEGADO') this.assertRoleCompatible(tournament, official.identificationNumber, 'participant');
+    }
+  }
+
+  private rememberTeamStaff(tournament: TournamentAuthorizationRecord, officials: PresentOfficial[]) {
+    for (const official of officials) {
+      if (official.role !== 'DELEGADO') tournament.participantIdentifications.add(official.identificationNumber);
     }
   }
 
@@ -3588,7 +5171,7 @@ export class OfficialScoringService {
       identificationNumber: record.identificationNumber
     };
 
-    if (visibility === 'free') {
+    if (visibility === 'free' || record.privateRegistration) {
       return base;
     }
 
@@ -3781,7 +5364,15 @@ export class OfficialScoringService {
 
   private normalizeIdentificationNumber(value: string, field: string) {
     const raw = this.requireText(value, field).toUpperCase();
-    const normalized = raw.replace(/[^A-Z0-9]/g, '');
+    const registered = this.registration?.resolvePlayer(raw);
+    if (registered) return registered.id;
+    const person = this.registration?.rosterPerson(raw);
+    if (person && this.globalPlayersByIdentification.get(person.id)?.privateRegistration) return person.id;
+    if (person?.privateIdentity) return person.id;
+    if (/^[VE]-\d+-\d+$/.test(raw)) {
+      throw new BadRequestException('Este número de registro no existe. Los códigos de menores los asigna el registro familiar.');
+    }
+    const normalized = (person?.identification || raw).replace(/[^A-Z0-9]/g, '');
 
     if (normalized.length < 4) {
       throw new BadRequestException(`${field} debe tener al menos 4 caracteres alfanumericos.`);
@@ -3846,3 +5437,4 @@ export class OfficialScoringService {
     return new Date().toISOString();
   }
 }
+import { isProfileLocation, type SportsTournament, type PlayerTeamMembership } from '@playsport/shared';

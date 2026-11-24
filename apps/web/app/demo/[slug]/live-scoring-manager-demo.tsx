@@ -1,15 +1,20 @@
 'use client';
 
 import { type ComponentRef, useEffect, useMemo, useRef, useState } from 'react';
-import { assignBattingOrder, availableLineupPositions, findDuplicateFieldPosition } from '@playsport/shared';
-import type { PresentOfficial, TeamSheet } from '@playsport/shared';
+import Link from 'next/link';
+import { InstitutionName } from '../../institutional-logos';
+import { officialGameNames, RosterClient, rosterRoleLabels, isPresentOfficialRole } from '@playsport/shared';
+import type { OfficialGameSummary, PresentOfficial, TeamSheet, ManagerRoster } from '@playsport/shared';
 import { demoCalendar, formatGameName, resolveParticipant } from './demo-calendar';
-import { fillMissingDemoJerseys, getDemoJerseyNumber } from './demo-players';
-import DemoJerseyAssignments from './demo-jersey-assignments';
+import ManagerLineupTable, { lineupRoleOptions, lineupTableError, resetLineupRows, type LineupEntryDraft } from './manager-lineup-table';
 import OfficialRunScoring from './official-run-scoring';
 import LiveScoringHeader from './live-scoring-header';
-import { DemoRecipientLinks, OfficialEntryForm, officialRoleLabels, readTeamSheets } from './team-sheets';
-import { fieldPositionLabels, privatePositions as fieldPositionOptions } from './private-scorecard';
+import { DemoRecipientNotice, officialRoleLabels, readTeamSheets } from './team-sheets';
+import { fieldPositionLabels } from './private-scorecard';
+import { useNavigationBusy, useNavigationDraft, useScreenBack } from '../../navigation-hooks';
+import { isStringListDraft, isTextDraft } from '../../navigation-drafts';
+import usePublicOfficialGames from './use-public-official-games';
+import OfficialResult from './official-result';
 
 type UiStatus = {
   kind: 'idle' | 'success' | 'error';
@@ -56,22 +61,16 @@ function readRepresentative(payload: unknown): FieldRepresentative | null {
   };
 }
 
-type LineupEntryDraft = {
-  identificationNumber: string;
-  battingOrder: number | null;
-  fieldPosition: string;
-  lineupRole: 'PLAYER' | 'DP' | 'FLEX' | 'EH';
-  jerseyNumber: string;
-};
+const isLineupDraft = (value: unknown): value is LineupEntryDraft[] => Array.isArray(value) && value.every((entry) =>
+  entry && typeof entry === 'object' && typeof entry.identificationNumber === 'string' &&
+  (entry.battingOrder === null || Number.isInteger(entry.battingOrder)) && typeof entry.fieldPosition === 'string' &&
+  ['PLAYER', 'DP', 'FLEX', 'EH'].includes(entry.lineupRole) && typeof entry.jerseyNumber === 'string');
+const isOfficialsDraft = (value: unknown): value is PresentOfficial[] => Array.isArray(value) && value.every((entry) =>
+  entry && typeof entry === 'object' && isPresentOfficialRole(entry.role) &&
+  typeof entry.identificationNumber === 'string' && typeof entry.displayName === 'string');
 
-const lineupRoleOptions: Array<{ value: LineupEntryDraft['lineupRole']; label: string }> = [
-  { value: 'PLAYER', label: 'Jugador regular' },
-  { value: 'DP', label: 'Bateador asignado' },
-  { value: 'FLEX', label: 'Jugador flexible · defensa sin turno' },
-  { value: 'EH', label: 'Bateador extra' }
-];
 const officialScoringApiBase =
-  process.env.NEXT_PUBLIC_OFFICIAL_SCORING_API_BASE ?? 'http://localhost:4000/api/official-scoring';
+  process.env.NEXT_PUBLIC_OFFICIAL_SCORING_API_BASE ?? '/api/official-scoring';
 
 function normalizeCedula(value: string) {
   return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -135,41 +134,39 @@ function adaptManagerError(message: string) {
     .replace(/\blineup\b/gi, 'alineación');
 }
 
-export default function LiveScoringManagerDemo({ rival = false }: { rival?: boolean }) {
-  const managerTournamentId = 'tour-global-1';
-  const managerTeamId = rival ? 'team-B' : 'team-A';
-  const managerGameId = 'game-global-1';
-  const managerProfileId = rival ? 'mgr-B' : 'mgr-A';
-  const managerTeamName = rival ? 'Leones del Norte' : 'Tigres del Valle';
-  const exampleIdentification = rival ? 'PRUEBA010' : 'PRUEBA001';
+export default function LiveScoringManagerDemo({ rival = false, assignment, managerId }: {
+  rival?: boolean; assignment?: OfficialGameSummary; managerId?: string;
+}) {
+  const managerTournamentId = assignment?.tournamentId ?? 'tour-global-1';
+  const managerTeamId = assignment ? assignment.managerTeamId ?? '' : rival ? 'team-B' : 'team-A';
+  const managerGameId = assignment?.gameId ?? 'game-global-1';
+  const managerProfileId = assignment ? managerId ?? '' : rival ? 'mgr-B' : 'mgr-A';
+  const officialCatalog = usePublicOfficialGames();
+  const officialGame = officialCatalog.games?.find(game => game.gameId === managerGameId && game.tournamentId === managerTournamentId) ?? assignment;
+  const managerTeamName = officialGame ? officialGameNames(officialGame)[managerTeamId] : rival ? 'Leones del Norte' : 'Tigres del Valle';
+  const protestLocked = Boolean(officialGame?.protest) || Boolean(officialGame && ['final', 'protested', 'suspended'].includes(officialGame.status));
   const [managerContextReady, setManagerContextReady] = useState(false);
 
   const [managerRosterCedulas, setManagerRosterCedulas] = useState<string[]>([]);
   const [managerRosterPlayers, setManagerRosterPlayers] = useState<RosterPlayerView[]>([]);
+  const [matchRoster, setMatchRoster] = useState<ManagerRoster | null>(null);
+  const rosterClient = useMemo(() => new RosterClient(managerProfileId.startsWith('person:') ? '/api/sporting' :
+    officialScoringApiBase.replace(/\/official-scoring\/?$/, ''), managerProfileId), [managerProfileId]);
 
-  const [managerLineupCedulaDraft, setManagerLineupCedulaDraft] = useState('');
-  const [managerLineupRoleDraft, setManagerLineupRoleDraft] = useState<LineupEntryDraft['lineupRole']>('PLAYER');
-  const [managerLineupJerseyNumberDraft, setManagerLineupJerseyNumberDraft] = useState('');
-  const [managerLineupEntries, setManagerLineupEntries] = useState<LineupEntryDraft[]>([]);
-  const [presentSubstitutes, setPresentSubstitutes] = useState<string[]>([]);
-  const [presentOfficials, setPresentOfficials] = useState<PresentOfficial[]>([]);
+  const draftScope = `${managerTournamentId}:${managerGameId}:${managerTeamId}:lineup`;
+  const [managerLineupEntries, setManagerLineupEntries] = useNavigationDraft<LineupEntryDraft[]>(`${draftScope}:entries`, [], isLineupDraft);
+  const [presentSubstitutes, setPresentSubstitutes] = useNavigationDraft<string[]>(`${draftScope}:substitutes`, [], isStringListDraft);
+  const [presentOfficials, setPresentOfficials] = useNavigationDraft<PresentOfficial[]>(`${draftScope}:staff`, [], isOfficialsDraft);
   const [submittedTeamSheet, setSubmittedTeamSheet] = useState<TeamSheet | null>(null);
-  const availablePositions = useMemo(() => availableLineupPositions(
-    managerLineupEntries, normalizeCedula(managerLineupCedulaDraft)
-  ).filter((position) => managerLineupRoleDraft !== 'FLEX' || position !== 'NA'),
-  [managerLineupEntries, managerLineupCedulaDraft, managerLineupRoleDraft]);
-
-  useEffect(() => {
-    if (submittedTeamSheet) return;
-    const filled = fillMissingDemoJerseys(managerLineupEntries);
-    if (filled !== managerLineupEntries) setManagerLineupEntries(filled);
-  }, [managerLineupEntries, submittedTeamSheet]);
-
+  const [teamSheetsVersion, setTeamSheetsVersion] = useState<number | null>(null);
+  const [withdrawalRequested, setWithdrawalRequested] = useState(false);
   const [managerUiStatus, setManagerUiStatus] = useState<UiStatus>({ kind: 'idle', message: '' });
   const [managerSubmitting, setManagerSubmitting] = useState(false);
+  useNavigationBusy(managerSubmitting);
   const [managerInitializationRequested, setManagerInitializationRequested] = useState(true);
-  const [step, setStep] = useState<'game' | 'representative' | 'lineup' | 'scorecard'>('game');
-  const [representativeCedula, setRepresentativeCedula] = useState('');
+  const [step, setStep] = useState<'game' | 'scorecard'>('game');
+  const [representativeCedula, setRepresentativeCedula] = useNavigationDraft(`${draftScope}:representative`, '', isTextDraft);
+  useScreenBack(() => setStep('game'), step === 'scorecard');
   const [authorizedRepresentative, setAuthorizedRepresentative] = useState<FieldRepresentative | null>(null);
   const stepHeading = useRef<ComponentRef<'h2'>>(null);
   const statusMessage = useRef<ComponentRef<'div'>>(null);
@@ -182,26 +179,25 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
 
   const calendarGames = demoCalendar.filter((game) => game.tournamentId === managerTournamentId.trim());
   const selectedGame = calendarGames.find((game) => game.id === managerGameId);
-  const selectedHome = selectedGame ? resolveParticipant(selectedGame.home, demoCalendar) : null;
-  const selectedAway = selectedGame ? resolveParticipant(selectedGame.away, demoCalendar) : null;
-  const hasValidAssignment = Boolean(
+  const selectedHome = assignment ? { teamId: assignment.homeTeamId, name: assignment.details?.homeTeamName ?? assignment.homeTeamId } :
+    selectedGame ? resolveParticipant(selectedGame.home, demoCalendar) : null;
+  const selectedAway = assignment ? { teamId: assignment.awayTeamId, name: assignment.details?.awayTeamName ?? assignment.awayTeamId } :
+    selectedGame ? resolveParticipant(selectedGame.away, demoCalendar) : null;
+  const gameLabel = assignment ? `${selectedAway?.name} vs. ${selectedHome?.name}` : selectedGame ? formatGameName(selectedGame) : 'Sin partido asignado';
+  const hasValidAssignment = assignment ? Boolean(managerProfileId && managerTeamId &&
+    [assignment.homeTeamId, assignment.awayTeamId].includes(managerTeamId)) : Boolean(
     selectedGame && !selectedGame.result && selectedHome && selectedAway &&
     [selectedHome.teamId, selectedAway.teamId].includes(managerTeamId.trim())
   );
 
-  const rosterNamesByCedula = useMemo(() => {
-    const map = new Map<string, string>();
-
-    for (const player of managerRosterPlayers) {
-      map.set(player.identificationNumber, player.displayName);
-    }
-
-    return map;
-  }, [managerRosterPlayers]);
-  const representativeCandidate = managerRosterPlayers.find(
-    (player) => player.identificationNumber === normalizeCedula(representativeCedula) &&
-      managerRosterCedulas.includes(player.identificationNumber)
-  );
+  const representativeMember = matchRoster?.members.find(row =>
+    normalizeCedula(row.person.id) === normalizeCedula(representativeCedula) ||
+    row.person.identification && normalizeCedula(row.person.identification) === normalizeCedula(representativeCedula));
+  const representativeCandidate = representativeMember ? {
+    identificationNumber: representativeMember.person.id, displayName: representativeMember.person.fullName
+  } : null;
+  const representativeConfirmed = Boolean(authorizedRepresentative && representativeMember &&
+    [representativeMember.person.id, representativeMember.person.identification].some(id => id && normalizeCedula(id) === normalizeCedula(authorizedRepresentative.identificationNumber)));
 
   const buildManagerContext = (): ManagerContext => ({
     tournamentId: managerTournamentId.trim(),
@@ -212,6 +208,7 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
 
   const postOfficialScoring = async (path: string, payload: unknown) => {
     const response = await fetch(`${officialScoringApiBase}/${path}`, {
+      credentials: 'include',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -228,7 +225,7 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
 
   const getOfficialScoring = async (path: string) => {
     try {
-      const response = await fetch(`${officialScoringApiBase}/${path}`, { signal: AbortSignal.timeout(10000) });
+      const response = await fetch(`${officialScoringApiBase}/${path}`, { credentials: 'include', signal: AbortSignal.timeout(10000) });
       const body: unknown = await response.json();
       if (!response.ok) {
         const message = parseApiMessage(body) ?? `Error ${response.status}`;
@@ -253,6 +250,7 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
         snapshot.ownTeamId !== context.teamId) {
       throw new Error('La entrega recibida no corresponde al partido y equipo asignados.');
     }
+    setTeamSheetsVersion(snapshot.version);
     return snapshot.sheets.find((sheet) => sheet.teamId === context.teamId) ?? null;
   };
 
@@ -274,17 +272,16 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
     setManagerSubmitting(true);
 
     try {
-      const [roster, representativePayload, submittedSheet] = await Promise.all([
+      const [roster, representativePayload, submittedSheet, personnel] = await Promise.all([
         getOfficialScoring(`tournaments/${context.tournamentId}/teams/${context.teamId}/roster?visibility=free`),
         getOfficialScoring(`games/${context.gameId}/teams/${context.teamId}/representative?tournamentId=${context.tournamentId}`),
-        loadSubmittedTeamSheet(context)
+        loadSubmittedTeamSheet(context),
+        rosterClient.load({ ...context, teamName: managerTeamName, tournamentName: managerTournamentId })
       ]);
+      setMatchRoster(personnel);
       const representative = readRepresentative(representativePayload);
       setAuthorizedRepresentative(representative);
       setRepresentativeCedula((current) => current || representative?.identificationNumber || '');
-      if (!representative) {
-        setStep((current) => current === 'lineup' ? 'representative' : current);
-      }
 
       const rosterIdsRaw =
         (roster as { rosterPlayerIdentificationNumbers?: unknown }).rosterPlayerIdentificationNumbers;
@@ -335,15 +332,9 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
 
       setManagerRosterCedulas(rosterIds);
       setManagerRosterPlayers(rosterPlayers);
-      setManagerLineupEntries((current) =>
-        assignBattingOrder(current
-          .filter((entry) => rosterIds.includes(entry.identificationNumber))
-          .sort(
-            (a, b) =>
-              (a.battingOrder ?? Number.MAX_SAFE_INTEGER) -
-              (b.battingOrder ?? Number.MAX_SAFE_INTEGER)
-          ))
-      );
+      setManagerLineupEntries(current => current.map(entry =>
+        entry.identificationNumber && !rosterIds.includes(entry.identificationNumber) ?
+          { ...entry, identificationNumber: '', jerseyNumber: '', fieldPosition: '' } : entry));
       restoreSubmittedTeamSheet(submittedSheet);
 
       if (!opts?.silent) {
@@ -395,7 +386,7 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
     if (!context.tournamentId || !context.teamId || !context.gameId || !context.managerId) {
       setManagerUiStatus({
         kind: 'error',
-        message: 'Completa los identificadores del torneo, equipo, juego y dirigente para activar el contexto del perfil.'
+        message: 'Completa los identificadores del torneo, equipo, juego y dirigente para activar el contexto del manager.'
       });
       return;
     }
@@ -431,7 +422,6 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
       const representative = readRepresentative(result);
       if (!representative) throw new Error('El servicio no confirmó la autorización del representante.');
       setAuthorizedRepresentative(representative);
-      setStep('lineup');
       setManagerUiStatus({
         kind: 'success',
         message: `${representative.displayName} está autorizado para representarte en el campo solo durante este partido.`
@@ -446,151 +436,9 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
     }
   };
 
-  const selectLineupPlayer = (identificationNumber: string) => {
-    setManagerLineupCedulaDraft(identificationNumber);
-    const existing = managerLineupEntries.find(
-      (entry) => entry.identificationNumber === normalizeCedula(identificationNumber)
-    );
-    setManagerLineupJerseyNumberDraft(existing?.jerseyNumber || getDemoJerseyNumber(identificationNumber));
-    if (existing) {
-      setManagerLineupRoleDraft(existing.lineupRole);
-    }
-  };
-
-  const upsertLineupEntry = (selectedPosition: string) => {
-    if (!managerContextReady) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Primero activa el contexto de torneo/equipo en tu perfil.'
-      });
-      return;
-    }
-
-    const identificationNumber = normalizeCedula(managerLineupCedulaDraft);
-    const battingOrder = managerLineupRoleDraft === 'FLEX' ? null : 1;
-    const fieldPosition = selectedPosition.trim().toUpperCase();
-    const jerseyNumber = managerLineupJerseyNumberDraft.trim();
-
-    if (identificationNumber.length < 4) {
-      setManagerUiStatus({ kind: 'error', message: 'Selecciona una cédula válida para la alineación.' });
-      return;
-    }
-
-    if (!managerRosterCedulas.includes(identificationNumber)) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'La cédula de la alineación debe existir en la plantilla oficial de este equipo.'
-      });
-      return;
-    }
-
-    if (!fieldPositionOptions.includes(fieldPosition)) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: `Posición de juego inválida. Usa: ${fieldPositionOptions.map((position) => fieldPositionLabels[position]).join(', ')}.`
-      });
-      return;
-    }
-
-    if (managerLineupRoleDraft === 'FLEX' && fieldPosition === 'NA') {
-      setManagerUiStatus({ kind: 'error', message: 'El jugador flexible debe tener una posición defensiva.' });
-      return;
-    }
-
-    const otherEntries = managerLineupEntries.filter((entry) => entry.identificationNumber !== identificationNumber);
-    const occupyingPlayer = otherEntries.find((entry) => fieldPosition !== 'NA' && entry.fieldPosition === fieldPosition);
-    if (occupyingPlayer) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: `${fieldPositionLabels[fieldPosition]} ya está asignado a ${occupyingPlayer.identificationNumber}. Selecciona una posición disponible.`
-      });
-      return;
-    }
-    if (otherEntries.length >= 14) {
-      setManagerUiStatus({ kind: 'error', message: 'La alineación permite hasta 13 bateadores y un jugador flexible.' });
-      return;
-    }
-    if (battingOrder !== null && otherEntries.filter((entry) => entry.battingOrder !== null).length >= 13) {
-      setManagerUiStatus({ kind: 'error', message: 'La alineación permite hasta 13 bateadores.' });
-      return;
-    }
-    if (managerLineupRoleDraft === 'FLEX' && otherEntries.some((entry) => entry.lineupRole === 'FLEX')) {
-      setManagerUiStatus({ kind: 'error', message: 'La alineación permite un solo jugador flexible.' });
-      return;
-    }
-
-    if (!/^\d{1,2}$/.test(jerseyNumber)) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Ingresa un numero de camiseta entre 0 y 99.'
-      });
-      return;
-    }
-
-    const duplicatedJerseyNumber = managerLineupEntries.find(
-      (entry) =>
-        entry.jerseyNumber === jerseyNumber && entry.identificationNumber !== identificationNumber
-    );
-
-    if (duplicatedJerseyNumber) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: `El numero de camiseta ${jerseyNumber} ya esta asignado a ${duplicatedJerseyNumber.identificationNumber}.`
-      });
-      return;
-    }
-
-    setManagerLineupEntries((current) => {
-      const updated = { identificationNumber, battingOrder, fieldPosition, lineupRole: managerLineupRoleDraft, jerseyNumber };
-      const next = current.some((entry) => entry.identificationNumber === identificationNumber)
-        ? current.map((entry) => entry.identificationNumber === identificationNumber ? updated : entry)
-        : [...current, updated];
-      return assignBattingOrder(next);
-    });
-
-    setManagerLineupCedulaDraft('');
-    setManagerLineupRoleDraft('PLAYER');
-    setManagerLineupJerseyNumberDraft('');
-    setManagerUiStatus({ kind: 'idle', message: '' });
-  };
-
-  const removeLineupEntry = (identificationNumber: string) => {
-    setManagerLineupEntries((current) =>
-      assignBattingOrder(current.filter((entry) => entry.identificationNumber !== identificationNumber))
-    );
-  };
-
-  const buildLineupFromRoster = () => {
-    if (!managerContextReady) {
-      setManagerUiStatus({
-        kind: 'error',
-        message: 'Activa primero tu contexto de torneo y equipo para crear la alineación.'
-      });
-      return;
-    }
-
-    if (managerRosterCedulas.length === 0) {
-      setManagerUiStatus({ kind: 'error', message: 'Primero carga o arma una plantilla con cédulas.' });
-      return;
-    }
-
-    const autoPositions = ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'OF4', 'SF', 'LF', 'CF'];
-    const seeded = managerRosterCedulas.slice(0, 9).map((identificationNumber, index) => ({
-      identificationNumber,
-      battingOrder: index + 1,
-      fieldPosition: autoPositions[Math.min(index, autoPositions.length - 1)],
-      lineupRole: 'PLAYER' as const,
-      jerseyNumber: getDemoJerseyNumber(identificationNumber)
-    }));
-
-    setManagerLineupEntries(seeded);
-    setManagerUiStatus({ kind: 'success', message: 'Alineación base generada desde la plantilla. Puedes ajustar las posiciones.' });
-  };
-
   const submitLineupToGame = async () => {
-    if (!authorizedRepresentative) {
-      setStep('representative');
-      setManagerUiStatus({ kind: 'error', message: 'Autoriza primero a tu representante en el campo para este partido.' });
+    if (!representativeConfirmed) {
+      setManagerUiStatus({ kind: 'error', message: 'Selecciona y guarda al dirigente de este partido desde el roster antes de enviar la alineación.' });
       return;
     }
     if (!hasValidAssignment) {
@@ -600,7 +448,7 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
     if (!managerContextReady) {
       setManagerUiStatus({
         kind: 'error',
-        message: 'Activa primero el contexto en tu perfil antes de enviar la alineación.'
+        message: 'Activa primero el contexto en el panel del manager antes de enviar la alineación.'
       });
       return;
     }
@@ -633,69 +481,16 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
         throw new Error('No se encontró la entrega anterior. Revisa el borrador y los datos del partido antes de enviarlo.');
       }
 
-      if (managerLineupEntries.length === 0) {
-        setManagerUiStatus({
-          kind: 'error',
-          message: 'Primero agrega jugadores a la alineación indicando su posición de juego.'
-        });
+      const error = lineupTableError(managerLineupEntries, managerRosterCedulas);
+      if (error) {
+        setManagerUiStatus({ kind: 'error', message: error });
         return;
       }
-
-      const completedEntries = fillMissingDemoJerseys(managerLineupEntries);
-      if (completedEntries !== managerLineupEntries) setManagerLineupEntries(completedEntries);
-      const sortedEntries = [...completedEntries].sort(
+      const sortedEntries = managerLineupEntries
+        .filter(entry => entry.identificationNumber)
+        .map(entry => ({ ...entry, jerseyNumber: entry.jerseyNumber.padStart(2, '0') })).sort(
         (a, b) => (a.battingOrder ?? Number.MAX_SAFE_INTEGER) - (b.battingOrder ?? Number.MAX_SAFE_INTEGER)
       );
-      const duplicatePosition = findDuplicateFieldPosition(sortedEntries);
-      if (duplicatePosition) {
-        setManagerUiStatus({
-          kind: 'error',
-          message: `La posición ${fieldPositionLabels[duplicatePosition]} está repetida. Corrige el borrador antes de enviar la alineación.`
-        });
-        return;
-      }
-      const battingEntries = sortedEntries.filter((entry) => entry.battingOrder !== null);
-      const dpCount = sortedEntries.filter((entry) => entry.lineupRole === 'DP').length;
-      const flexCount = sortedEntries.filter((entry) => entry.lineupRole === 'FLEX').length;
-      if (battingEntries.length < 9 || battingEntries.length > 13 || sortedEntries.length > 14) {
-        setManagerUiStatus({ kind: 'error', message: 'La alineación debe tener de 9 a 13 bateadores y permite un jugador flexible adicional.' });
-        return;
-      }
-
-      if (dpCount !== flexCount || flexCount > 1) {
-        setManagerUiStatus({ kind: 'error', message: 'El bateador asignado y el jugador flexible deben registrarse juntos.' });
-        return;
-      }
-      const missingJerseyNumber = sortedEntries.find((entry) => !/^\d{1,2}$/.test(entry.jerseyNumber));
-
-      if (missingJerseyNumber) {
-        setManagerUiStatus({
-          kind: 'error',
-          message: `Asigna un número de camiseta entre 0 y 99 a ${missingJerseyNumber.identificationNumber} y agrega o actualiza su entrada antes de enviar.`
-        });
-        return;
-      }
-
-      const missingFromRoster = sortedEntries.find(
-        (entry) => !managerRosterCedulas.includes(entry.identificationNumber)
-      );
-
-      if (missingFromRoster) {
-        setManagerUiStatus({
-          kind: 'error',
-          message: `La cédula ${missingFromRoster.identificationNumber} no está en la plantilla oficial del equipo.`
-        });
-        return;
-      }
-
-      const hasNonConsecutiveOrder = battingEntries.some((entry, index) => entry.battingOrder !== index + 1);
-      if (hasNonConsecutiveOrder) {
-        setManagerUiStatus({
-          kind: 'error',
-          message: 'La alineación debe usar un orden de bateo consecutivo comenzando en 1.'
-        });
-        return;
-      }
 
       await postOfficialScoring(`games/${context.gameId}/lineups`, {
         tournamentId: context.tournamentId,
@@ -709,7 +504,7 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
       });
       setManagerUiStatus({
         kind: 'success',
-        message: 'Alineación, suplentes y directivos presentes entregados en las bandejas del organizador, los anotadores autorizados y el dirigente rival.'
+        message: 'Alineación, suplentes y personal presente entregados en las bandejas del organizador, los anotadores autorizados y el dirigente rival.'
       });
       setStep('scorecard');
       try {
@@ -731,6 +526,53 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
     }
   };
 
+  const canWithdraw = Boolean(submittedTeamSheet?.canWithdraw && officialGame?.status === 'scheduled' && !protestLocked);
+  const withdrawLineup = async () => {
+    if (!submittedTeamSheet || !canWithdraw || teamSheetsVersion === null) {
+      setManagerUiStatus({ kind: 'error', message: 'Actualiza los datos: solo puedes cancelar tu alineación enviada antes de iniciar el partido.' });
+      return;
+    }
+    setManagerSubmitting(true);
+    setManagerUiStatus({ kind: 'idle', message: '' });
+    try {
+      const snapshot = readTeamSheets(await postOfficialScoring(
+        `games/${managerGameId}/team-sheets/${managerTeamId}/withdraw`, {
+          tournamentId: managerTournamentId, managerId: managerProfileId,
+          expectedRevision: submittedTeamSheet.revision, expectedVersion: teamSheetsVersion
+        }));
+      if (snapshot.gameId !== managerGameId || snapshot.tournamentId !== managerTournamentId ||
+          snapshot.ownTeamId !== managerTeamId || snapshot.sheets.some(sheet => sheet.teamId === managerTeamId)) {
+        throw new Error('No se pudo confirmar la cancelación de tu alineación. Actualiza los datos del partido.');
+      }
+      setTeamSheetsVersion(snapshot.version);
+      setSubmittedTeamSheet(null);
+      setManagerLineupEntries(resetLineupRows());
+      setWithdrawalRequested(false);
+      setStep('game');
+      setManagerUiStatus({ kind: 'success', message: 'Lineup enviado cancelado. El cuadro está vacío y listo para rehacerlo; debes volver a enviarlo. Se conservaron el dirigente, el roster y el equipo rival.' });
+      officialCatalog.refresh();
+    } catch (error) {
+      setManagerUiStatus({ kind: 'error', message: adaptManagerError(error instanceof Error ? error.message : 'No se pudo cancelar la alineación enviada.') });
+    } finally {
+      setManagerSubmitting(false);
+    }
+  };
+  const withdrawalControls = canWithdraw ? <section className="baseballWithdrawal" aria-label="Cancelar alineación antes del inicio">
+    <div><strong>¿Necesitas cambiar tu alineación?</strong>
+      <p>Antes del primer lanzamiento puedes retirar tu entrega y preparar un lineup nuevo.</p></div>
+    {!withdrawalRequested ? <button type="button" className="managerButtonOutline baseballDangerButton"
+      disabled={managerSubmitting || teamSheetsVersion === null} onClick={() => setWithdrawalRequested(true)}>Cancelar lineup enviado</button> :
+      <div role="group" aria-label="Confirmar cancelación del lineup enviado">
+        <p>Se retirará tu alineación de las bandejas del rival y los oficiales. Tu cuadro volverá a las 13 filas vacías para rehacerlo y enviarlo otra vez con un mínimo de 9 titulares. No se toca el roster ni el lineup rival.</p>
+        <div className="managerButtonRow">
+          <button type="button" className="managerButtonOutline baseballDangerButton" disabled={managerSubmitting}
+            onClick={withdrawLineup}>{managerSubmitting ? 'Cancelando entrega…' : 'Sí, cancelar y rehacer'}</button>
+          <button type="button" className="managerButtonOutline" disabled={managerSubmitting}
+            onClick={() => setWithdrawalRequested(false)}>Conservar lineup enviado</button>
+        </div>
+      </div>}
+  </section> : null;
+
   const statusNotice = managerUiStatus.kind === 'idle' ? null : (
     <div
       ref={statusMessage}
@@ -743,85 +585,90 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
   );
 
   const scorecardOpen = step === 'scorecard' && Boolean(selectedHome && selectedAway);
+  const availableSubstitutes = managerRosterPlayers.filter(player =>
+    !managerLineupEntries.some(entry => entry.identificationNumber === player.identificationNumber));
+  const selectedSubstituteCount = availableSubstitutes.filter(player => presentSubstitutes.includes(player.identificationNumber)).length;
   return (
-    <>
+    <div className="baseballManager">
     {!scorecardOpen ? <LiveScoringHeader /> : null}
     <section className="managerWorkspace" aria-label="Gestión del dirigente en vivo">
       {!scorecardOpen ? <>
+      {officialCatalog.error ? <p role="alert">{officialCatalog.error}</p> : null}
+      {officialGame && ['protested', 'final', 'suspended'].includes(officialGame.status) ? <article className="managerCard">
+        <h2>Resultado del partido oficial</h2>
+        <OfficialResult game={officialGame} />
+        {officialGame.protest?.resolution ? <p>Fundamento: {officialGame.protest.resolution.reason} · Acta: {officialGame.protest.resolution.recordReference}</p> : null}
+        <Link className="managerButtonOutline" href={`/demo/events-map?official=${encodeURIComponent(officialGame.gameId)}`}>Ver partido y acta · Solo lectura</Link>
+      </article> : null}
       <nav className="managerSteps" aria-label="Pasos para preparar el partido">
         <ol>
-          <li aria-current={step === 'game' ? 'step' : undefined}>1. Verificar partido</li>
-          <li aria-current={step === 'representative' ? 'step' : undefined}>2. Autorizar representante</li>
-          <li aria-current={step === 'lineup' ? 'step' : undefined}>3. Preparar alineación</li>
-          <li aria-current={step === 'scorecard' ? 'step' : undefined}>4. Partido oficial en vivo</li>
+          <li aria-current={step !== 'scorecard' ? 'step' : undefined}>1. Preparar partido: roster, dirigente y lineup</li>
+          <li aria-current={step === 'scorecard' ? 'step' : undefined}>2. Partido oficial en vivo</li>
         </ol>
       </nav>
-      {step !== 'lineup' ? statusNotice : null}
       </> : null}
-      {step === 'game' ? (
-      <article className="managerCard managerStepCard">
-        <h2 ref={stepHeading} tabIndex={-1}>Partido asignado al dirigente</h2>
-        <p>
-          El organizador o anotador selecciona el partido. El dirigente recibe el torneo, equipo y juego
-          asignados y prepara la alineación del día usando la plantilla oficial ya inscrita.
+      {statusNotice}
+      {step !== 'scorecard' ? (
+      <article className="managerCard managerStepCard baseballGameCard">
+        <header className="baseballGameMasthead">
+          <div><span className="baseballEyebrow">PlaySport · Clubhouse</span>
+            <h2 ref={stepHeading} tabIndex={-1}>Preparar el partido asignado</h2></div>
+          <span className="baseballGameStatus">{officialGame?.status === 'scheduled' ? 'Antes del primer lanzamiento' : 'Partido oficial'}</span>
+        </header>
+        <div className="baseballMatchup" aria-label={gameLabel}>
+          <div><span>Visitante{managerTeamId === officialGame?.awayTeamId ? ' · Tu equipo' : ''}</span>
+            <strong><InstitutionName id={officialGame?.awayTeamId ?? selectedAway?.teamId}>{officialGame?.details?.awayTeamName ?? selectedAway?.name ?? 'Rival por definir'}</InstitutionName></strong></div>
+          <span className="baseballVersus" aria-hidden="true">VS</span>
+          <div><span>Local{managerTeamId === officialGame?.homeTeamId ? ' · Tu equipo' : ''}</span>
+            <strong><InstitutionName id={officialGame?.homeTeamId ?? selectedHome?.teamId}>{officialGame?.details?.homeTeamName ?? selectedHome?.name ?? 'Rival por definir'}</InstitutionName></strong></div>
+        </div>
+        <dl className="baseballGameFacts" aria-label="Datos fijos del partido asignado">
+          <dt>Torneo asignado</dt><dd><InstitutionName kind="tournament" id={managerTournamentId}>{officialGame?.details?.tournamentName ?? managerTournamentId}</InstitutionName></dd>
+          <dt>Equipo que diriges</dt><dd><InstitutionName id={managerTeamId}>{managerTeamName}</InstitutionName></dd>
+          <dt>Fecha y hora</dt><dd>{officialGame?.details ? `${officialGame.details.date} · ${officialGame.details.time}` : 'Por confirmar'}</dd>
+          <dt>Estadio</dt><dd>{officialGame?.details?.venue ?? 'Por confirmar'}</dd>
+        </dl>
+        <details className="baseballHelp"><summary>Información de la asignación</summary><p id="calendar-description">
+          {assignment ? 'Partido de tu equipo configurado por el organizador. El lineup y los movimientos corresponden únicamente a este encuentro.' :
+            'La fase y el número de juego provienen del calendario; el dirigente no puede cambiarlos. Los cruces avanzan con resultados oficiales confirmados.'}
         </p>
-
-        <label className="managerField">
-          <span>Torneo asignado</span>
-          <input
-            value="Torneo de demostración"
-            readOnly
-          />
-        </label>
-
-        <label className="managerField">
-          <span>Equipo asignado</span>
-          <input value={selectedHome?.teamId === managerTeamId ? selectedHome.name : selectedAway?.name ?? 'Por definir'} readOnly />
-        </label>
-
-        <label className="managerField">
-          <span>Partido asignado por el organizador o anotador</span>
-          <input
-            value={selectedGame ? formatGameName(selectedGame) : 'Sin partido asignado'}
-            readOnly
-            aria-describedby="calendar-description"
-          />
-        </label>
-        <p id="calendar-description">
-          Asignación simulada con datos ficticios. La fase y el número de juego provienen del calendario;
-          el dirigente no puede cambiarlos. Los cruces avanzan con resultados oficiales confirmados.
-        </p>
-        {calendarGames.length === 0 ? (
-          <p className="managerWarning">No hay calendario de demostración para este torneo. Usa tour-global-1.</p>
+        {!assignment && calendarGames.length === 0 ? (
+          <p className="managerWarning">No hay calendario disponible para este torneo.</p>
         ) : null}
-        {selectedGame ? (
-          <p role="status">
-            {formatGameName(selectedGame)} · {selectedHome?.name ?? 'Ganador por definir'} contra {selectedAway?.name ?? 'Ganador por definir'}
-          </p>
-        ) : null}
-        <details>
-          <summary>Resultados confirmados del calendario de demostración</summary>
+        {!assignment ? <details>
+          <summary>Resultados confirmados del calendario</summary>
           <ul>
             {calendarGames.filter((game) => game.result?.official).map((game) => (
               <li key={game.id}>
-                {formatGameName(game)}: {resolveParticipant(game.home, demoCalendar)?.name} {game.result?.home}
-                {' – '}{game.result?.away} {resolveParticipant(game.away, demoCalendar)?.name}
+                {formatGameName(game)}: <InstitutionName example>{resolveParticipant(game.home, demoCalendar)?.name}</InstitutionName> {game.result?.home}
+                {' – '}{game.result?.away} <InstitutionName example>{resolveParticipant(game.away, demoCalendar)?.name}</InstitutionName>
               </li>
             ))}
           </ul>
+        </details> : null}
+
+        <DemoRecipientNotice />
         </details>
-
-        <label className="managerField">
-          <span>Perfil del dirigente</span>
-          <input
-            value={`Dirigente de ${managerTeamName}`}
-            readOnly
-          />
+        <section className="baseballDugout" aria-label="Dirigente del partido">
+        <h3>Al mando del dugout</h3>
+        <div className="baseballDugoutControls">
+        <label className="managerField"><span>Seleccionar dirigente desde el roster</span>
+          <select value={representativeCandidate?.identificationNumber ?? ''} disabled={managerSubmitting || !managerContextReady || protestLocked}
+            onChange={event => { setRepresentativeCedula(event.target.value); setManagerUiStatus({ kind: 'idle', message: '' }); }}>
+            <option value="">Elige al dirigente de este partido</option>
+            {matchRoster?.members.map(row => <option key={row.person.id} value={row.person.id}>{row.person.fullName} · {rosterRoleLabels[row.role]}</option>)}
+          </select>
         </label>
-
+        <button type="button" className="managerButtonSolid" disabled={managerSubmitting || !managerContextReady || !representativeCandidate || protestLocked}
+          onClick={authorizeRepresentative}>Guardar dirigente del partido</button>
+        </div>
+        {authorizedRepresentative ? <p className="baseballHint">Dirigente confirmado: <strong>{authorizedRepresentative.displayName}</strong>.</p> : <p className="baseballHint">Selecciona a un integrante del roster. Dirige solo este partido; no cambia al manager permanente ni sus permisos.</p>}
+        {representativeCandidate && !representativeConfirmed ? <p role="status">La selección aún no está guardada para este partido.</p> : null}
+        </section>
+        <div className="baseballGameActions">
         <button
           type="button"
-          className="managerButtonSolid"
+          className="managerButtonOutline"
           disabled={managerSubmitting || !hasValidAssignment}
           aria-busy={managerSubmitting}
           onClick={activateManagerContext}
@@ -829,298 +676,133 @@ export default function LiveScoringManagerDemo({ rival = false }: { rival?: bool
           {managerSubmitting ? 'Cargando datos del partido…' : managerContextReady ? 'Actualizar datos del partido asignado' : 'Cargar datos del partido asignado'}
         </button>
 
-        <p className="managerStateText" role="status">Estado: {managerSubmitting ? 'Cargando el partido; espera a que termine.' : managerContextReady ? 'Contexto activo' : 'Contexto pendiente. Carga los datos para habilitar la confirmación.'}</p>
-        <button
-          type="button"
-          className="managerButtonSolid"
-          disabled={!managerContextReady || managerSubmitting || !hasValidAssignment}
-          onClick={() => {
-            setManagerUiStatus({ kind: 'idle', message: '' });
-            setStep('representative');
-          }}
-        >
-          Confirmar partido y continuar
-        </button>
+        <span className="baseballContextState" role="status">{managerSubmitting ? 'Cargando partido…' : managerContextReady ? 'Datos del partido listos' : 'Datos pendientes de cargar'}</span>
         <button type="button" className="managerButtonOutline" disabled={!managerContextReady || managerSubmitting} onClick={() => {
           setManagerUiStatus({ kind: 'idle', message: '' });
           setStep('scorecard');
         }}>Ver partido oficial en vivo</button>
-        <DemoRecipientLinks />
+        </div>
       </article>
       ) : null}
-      {step === 'game' ? <DemoJerseyAssignments assignedPlayers={[
-        ...(submittedTeamSheet?.initialLineup ?? []).map((player) => ({ id: player.identificationNumber, jersey: player.jerseyNumber ?? '' })),
-        ...managerLineupEntries.map((player) => ({ id: player.identificationNumber, jersey: player.jerseyNumber }))
-      ]} /> : null}
-
-      {step === 'representative' ? (
-        <article className="managerCard managerStepCard">
-          <h2 ref={stepHeading} tabIndex={-1}>Representante en el campo para este partido</h2>
-          <p>{selectedGame ? formatGameName(selectedGame) : ''} · {managerTeamName}</p>
-          <p>
-            Tú sigues actuando desde la cuenta del dirigente. Autoriza a un integrante de tu plantilla
-            para que te represente físicamente en el campo. Esta autorización no cambia al dirigente
-            permanente ni concede acceso a su cuenta.
-          </p>
-          <label className="managerField">
-            <span>Cédula del representante en el campo</span>
-            <input
-              value={representativeCedula}
-              onChange={(event) => {
-                setRepresentativeCedula(event.target.value);
-                setManagerUiStatus({ kind: 'idle', message: '' });
-              }}
-              autoCapitalize="characters"
-              autoComplete="off"
-              placeholder={`Ej. ${exampleIdentification}`}
-              aria-describedby="representative-help"
-            />
-          </label>
-          <p id="representative-help">Para probar, introduce {exampleIdentification} o la cédula de otro integrante de la plantilla oficial.</p>
-          {representativeCandidate ? (
-            <div className="managerInlineList" aria-live="polite">
-              <h3>Datos del integrante de la plantilla</h3>
-              <p>Nombre: {representativeCandidate.displayName}</p>
-              <p>Cédula: {representativeCandidate.identificationNumber}</p>
-              <p>Equipo: {managerTeamName}</p>
-            </div>
-          ) : representativeCedula.trim() ? (
-            <p className="managerWarning" role="status">No se encontró esa cédula en la plantilla oficial de este equipo.</p>
-          ) : null}
-          {authorizedRepresentative ? (
-            <p>Representante autorizado actualmente: {authorizedRepresentative.displayName} · {authorizedRepresentative.identificationNumber}.</p>
-          ) : null}
-          <div className="managerButtonRow">
-            <button type="button" className="managerButtonOutline" disabled={managerSubmitting} onClick={() => {
-              setManagerUiStatus({ kind: 'idle', message: '' });
-              setStep('game');
-            }}>Volver al partido</button>
-            <button
-              type="button"
-              className="managerButtonSolid"
-              disabled={managerSubmitting || !managerContextReady || !representativeCandidate}
-              onClick={authorizeRepresentative}
-            >
-              {managerSubmitting ? 'Guardando autorización…' : 'Autorizar para este partido y continuar'}
-            </button>
-          </div>
-        </article>
-      ) : null}
-
+      {step !== 'scorecard' && managerContextReady && !submittedTeamSheet ? <article className="managerCard managerStepCard managerLineupPreparation">
+        <header className="baseballSectionHeading"><div><span className="baseballEyebrow">Tarjeta de alineación · <InstitutionName id={managerTeamId}>{managerTeamName}</InstitutionName></span><h2>Cuadro de lineup</h2></div><span className="baseballDraftStamp">Borrador</span></header>
+        <ManagerLineupTable entries={managerLineupEntries} players={managerRosterPlayers}
+          disabled={managerSubmitting || protestLocked} onChange={setManagerLineupEntries} />
+        <p className="baseballHint">Toca una fila para editarla. Esta tarjeta es del partido; tu roster permanente no cambia.</p>
+      </article> : null}
       {step === 'scorecard' && selectedHome && selectedAway ? (
+        <>
+        {withdrawalControls ? <article className="managerCard managerStepCard">{withdrawalControls}</article> : null}
         <OfficialRunScoring
           apiBase={officialScoringApiBase}
           tournamentId={managerTournamentId}
           gameId={managerGameId}
           actorId={managerProfileId}
           actorRole="manager"
+          allowManagerRequests={Boolean(assignment)}
           ownTeamId={managerTeamId}
+          teamNames={officialGame ? officialGameNames(officialGame) : undefined}
           onBack={() => {
             setManagerUiStatus({ kind: 'idle', message: '' });
             setStep('game');
           }}
         />
+        </>
       ) : null}
 
-      {step === 'lineup' ? (
+      {step !== 'scorecard' && managerContextReady ? (
       <>
-      <article className="managerCard managerStepCard">
-        <h2 ref={stepHeading} tabIndex={-1}>Preparar alineación del partido</h2>
-        <p>{selectedGame ? formatGameName(selectedGame) : ''} · {managerTeamName}</p>
-        {authorizedRepresentative ? (
-          <p>
-            Representante en el campo: <strong>{authorizedRepresentative.displayName}</strong>
-            {' · '}{authorizedRepresentative.identificationNumber}. Autorizado por el dirigente para este juego.
-          </p>
-        ) : (
-          <p className="managerWarning">Debes autorizar a un representante antes de enviar la alineación.</p>
-        )}
-        <button type="button" className="managerButtonOutline" disabled={managerSubmitting} onClick={() => {
-          setRepresentativeCedula(authorizedRepresentative?.identificationNumber ?? '');
-          setManagerUiStatus({ kind: 'idle', message: '' });
-          setStep('representative');
-        }}>Volver a la autorización del representante</button>
-      </article>
-
       {submittedTeamSheet ? (
-      <article className="managerCard managerStepCard">
-        <h2>Alineación ya entregada</h2>
+      <article className="managerCard managerStepCard managerLineupPreparation">
+        <header className="baseballSectionHeading"><div><span className="baseballEyebrow">Tarjeta de alineación · <InstitutionName id={managerTeamId}>{managerTeamName}</InstitutionName></span><h2>Alineación ya entregada</h2></div><span className="baseballDraftStamp baseballSentStamp">Enviada</span></header>
         <p>Se recuperó la entrega guardada del partido, versión {submittedTeamSheet.revision}. No necesitas armarla ni enviarla otra vez.</p>
         <p>Comunica los cambios en el campo al anotador u organizador. Ellos los registran y aquí se reflejan en vivo; no necesitas usar el teléfono para solicitarlos.</p>
-        <ul aria-label="Alineación entregada recuperada">
+        {withdrawalControls}
+        <ol className="baseballDeliveredLineup" aria-label="Alineación entregada recuperada">
           {submittedTeamSheet.lineup.map((player) => <li key={player.identificationNumber}>
-            {player.battingOrder === null ? 'Sin turno' : `Turno ${player.battingOrder}`} · {player.displayName} · {player.identificationNumber}
-            {' · '}{lineupRoleOptions.find((option) => option.value === player.lineupRole)?.label}
-            {' · '}{fieldPositionLabels[player.fieldPosition]} · camiseta {player.jerseyNumber ?? 'sin asignar'}
+            <strong className="baseballOrder">{player.battingOrder === null ? 'FLEX' : String(player.battingOrder).padStart(2, '0')}</strong>
+            <span><strong>{player.displayName}</strong><small title={lineupRoleOptions.find(option => option.value === player.lineupRole)?.label}><span className="baseballPlayerId">{player.identificationNumber} · </span>{player.lineupRole === 'PLAYER' ? 'Regular' : player.lineupRole}</small></span>
+            <span className="baseballJersey" aria-label={`Camiseta ${player.jerseyNumber ?? 'sin asignar'}`}>{player.jerseyNumber ?? '—'}</span>
+            <abbr title={fieldPositionLabels[player.fieldPosition]}>{player.fieldPosition}</abbr>
           </li>)}
-        </ul>
-        <h3>Suplentes presentes confirmados</h3>
+        </ol>
+        <section className="baseballBench" aria-label="Suplentes presentes confirmados">
+        <header className="baseballSectionHeading"><h3>Suplentes presentes confirmados</h3><span className="baseballBenchCount">{submittedTeamSheet.presentSubstitutes.length} presentes</span></header>
         {submittedTeamSheet.presentSubstitutes.length ? (
-          <ul>{submittedTeamSheet.presentSubstitutes.map((player) => <li key={player.identificationNumber}>{player.displayName} · {player.identificationNumber}{getDemoJerseyNumber(player.identificationNumber) ? ` · Camiseta ${getDemoJerseyNumber(player.identificationNumber)}` : ''}</li>)}</ul>
-        ) : <p>No se declararon suplentes presentes.</p>}
-        <h3>Directivos presentes</h3>
+          <ul className="baseballBenchGrid">{submittedTeamSheet.presentSubstitutes.map(player => <li className="baseballBenchPlayer is-present" key={player.identificationNumber}>
+            <span className="baseballBenchBadge" aria-hidden="true">SUP</span>
+            <span className="baseballBenchIdentity"><strong>{player.displayName}</strong><small>{player.identificationNumber}</small></span>
+            <span className="baseballBenchPresence">Confirmado</span>
+          </li>)}</ul>
+        ) : <p className="baseballHint">No se declararon suplentes presentes.</p>}
+        </section>
+        <h3>Personal presente</h3>
         {submittedTeamSheet.presentOfficials.length ? (
           <ul>{submittedTeamSheet.presentOfficials.map((official) => <li key={`${official.role}:${official.identificationNumber}`}>
             {officialRoleLabels[official.role]} · {official.displayName} · {official.identificationNumber}
           </li>)}</ul>
-        ) : <p>No se declararon directivos presentes.</p>}
+        ) : <p>No se declaró personal presente.</p>}
         <button type="button" className="managerButtonSolid" disabled={managerSubmitting || !managerContextReady} aria-busy={managerSubmitting} onClick={submitLineupToGame}>
           {managerSubmitting ? 'Recuperando alineación…' : 'Continuar a la planilla de anotaciones'}
         </button>
-        {statusNotice}
       </article>
       ) : (
-      <article className="managerCard managerStepCard">
-        <h2>Constructor de alineación</h2>
-        <p>
-          Selecciona el jugador, revisa su camiseta y rol y elige su posición. Al elegirla se incorpora inmediatamente a la alineación, sin pulsar otro botón. Solo se permiten cédulas incluidas en la plantilla
-          oficial del equipo.
-        </p>
-        <p>
-          Aquí solo se prepara la alineación de este partido. Agregar o quitar un jugador de la
-          alineación no modifica la plantilla del torneo. Sus altas, bajas y plazos de modificación
-          corresponden a un apartado independiente.
-        </p>
-
-        {managerRosterCedulas.length > 0 ? (
-          <div className="chipWrap" role="group" aria-label="Jugadores inscritos disponibles para la alineación">
-            {managerRosterCedulas.map((id) => (
-              <button key={`lineup-${id}`} type="button" className="chipSubtle" onClick={() => selectLineupPlayer(id)}>
-                {rosterNamesByCedula.get(id)} · {id}{getDemoJerseyNumber(id) ? ` · Camiseta ${getDemoJerseyNumber(id)}` : ''}
-              </button>
-            ))}
-          </div>
-        ) : null}
-
-        <label className="managerField">
-          <span>Cédula para la alineación</span>
-          <input
-            value={managerLineupCedulaDraft}
-            onChange={(event) => selectLineupPlayer(event.target.value)}
-            autoCapitalize="characters"
-            autoComplete="off"
-          />
-        </label>
-
-        <p>El orden de bateo se asigna automáticamente al agregar jugadores. Si actualizas uno, conserva su lugar; al quitarlo, se ajustan los turnos. El jugador flexible no batea.</p>
-
-        <label className="managerField">
-          <span>Rol en la alineación</span>
-          <select
-            value={managerLineupRoleDraft}
-            onChange={(event) => setManagerLineupRoleDraft(event.target.value as LineupEntryDraft['lineupRole'])}
-          >
-            {lineupRoleOptions.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
-
-        <label className="managerField">
-          <span>Número de camiseta para este juego (0–99)</span>
-          <input
-            value={managerLineupJerseyNumberDraft}
-            onChange={(event) => setManagerLineupJerseyNumberDraft(event.target.value)}
-            inputMode="numeric"
-            autoComplete="off"
-            placeholder="Ej. 12"
-          />
-        </label>
-        <p>Los jugadores ficticios tienen camisetas de prueba precargadas. Puedes cambiar el número antes de elegir la posición.</p>
-
-        <label className="managerField">
-          <span>Posición defensiva</span>
-          <select
-            value=""
-            disabled={managerSubmitting || !managerRosterCedulas.includes(normalizeCedula(managerLineupCedulaDraft))}
-            onChange={(event) => upsertLineupEntry(event.target.value)}
-          >
-            <option value="" disabled>Selecciona una posición disponible</option>
-            {availablePositions.map((position) => (
-              <option key={position} value={position}>{fieldPositionLabels[position] ?? position}</option>
-            ))}
-          </select>
-        </label>
-        <p>La posición elegida desaparece del selector de inmediato y el jugador queda agregado. Al quitarlo, su posición vuelve a estar disponible. «Sin posición defensiva» no ocupa una posición en el campo.</p>
-
-        <p>La regla del corredor temporal la configura el organizador del torneo, no el dirigente.</p>
-
-        <div className="managerButtonRow">
-          {managerLineupEntries.some((entry) => entry.identificationNumber === normalizeCedula(managerLineupCedulaDraft)) ? (
-          <button
-            type="button"
-            className="managerButtonSolid"
-            disabled={managerSubmitting}
-            onClick={() => upsertLineupEntry(
-              managerLineupEntries.find((entry) => entry.identificationNumber === normalizeCedula(managerLineupCedulaDraft))?.fieldPosition ?? ''
-            )}
-          >
-            Guardar cambios de camiseta y rol
-          </button>
-          ) : null}
-          <button
-            type="button"
-            className="managerButtonOutline"
-            disabled={managerSubmitting}
-            onClick={buildLineupFromRoster}
-          >
-            Generar alineación base
-          </button>
+      <article className="managerCard managerStepCard managerLineupPreparation">
+        <header className="baseballSectionHeading"><div><span className="baseballEyebrow">Banca del equipo</span><h2>Suplentes presentes y envío</h2></div>
+          <span className="baseballBenchCount">{selectedSubstituteCount} presentes · {availableSubstitutes.length} disponibles</span></header>
+        <p className="baseballHint">Marca a los suplentes que ya están en el campo. Los jugadores elegidos en el lineup no aparecen en la banca.</p>
+        <div className="baseballBenchGrid" role="group" aria-label="Elegir suplentes presentes">
+        {availableSubstitutes.map(player => {
+          const present = presentSubstitutes.includes(player.identificationNumber);
+          return <label className={`baseballBenchPlayer${present ? ' is-present' : ''}`} key={player.identificationNumber}>
+            <input type="checkbox" aria-label={`Suplente presente: ${player.displayName}`} checked={present}
+              disabled={managerSubmitting || protestLocked} onChange={event => {
+                setPresentSubstitutes(current => event.target.checked ? [...current, player.identificationNumber] : current.filter(id => id !== player.identificationNumber));
+              }} />
+            <span className="baseballBenchBadge" aria-hidden="true">SUP</span>
+            <span className="baseballBenchIdentity"><strong>{player.displayName}</strong><small>{player.identificationNumber}</small></span>
+            <span className="baseballBenchPresence">{present ? 'Presente' : 'Marcar presente'}</span>
+          </label>;
+        })}
         </div>
-
-        {managerLineupEntries.length > 0 ? (
-          <div className="managerInlineList">
-            <h3>Borrador de alineación · {managerLineupEntries.filter((entry) => entry.battingOrder !== null).length} bateadores / {managerLineupEntries.length} jugadores</h3>
-            {managerLineupEntries.map((entry) => (
-              <button
-                key={`${entry.identificationNumber}-${entry.battingOrder ?? entry.lineupRole}`}
-                type="button"
-                className="lineupEntry"
-                onClick={() => removeLineupEntry(entry.identificationNumber)}
-              >
-                {entry.battingOrder === null ? 'Sin turno' : `#${entry.battingOrder}`} · {lineupRoleOptions.find((option) => option.value === entry.lineupRole)?.label} · Camiseta {entry.jerseyNumber || '—'} · {rosterNamesByCedula.get(entry.identificationNumber)} · {entry.identificationNumber} · {fieldPositionLabels[entry.fieldPosition]} · quitar de la alineación
-              </button>
-            ))}
-          </div>
-        ) : null}
-
-        <h3>Suplentes presentes para este partido</h3>
-        <p>Marca solo a quienes ya están en el campo. Esta lista usa la plantilla oficial y no agrega jugadores al torneo.</p>
-        {managerRosterPlayers.filter((player) => !managerLineupEntries.some((entry) => entry.identificationNumber === player.identificationNumber)).map((player) => (
-          <label className="privateCheck" key={player.identificationNumber}>
-            <input type="checkbox" checked={presentSubstitutes.includes(player.identificationNumber)} disabled={managerSubmitting} onChange={(event) => {
-              setPresentSubstitutes((current) => event.target.checked ? [...current, player.identificationNumber] : current.filter((id) => id !== player.identificationNumber));
-            }} />
-            {player.displayName} · {player.identificationNumber}{getDemoJerseyNumber(player.identificationNumber) ? ` · Camiseta ${getDemoJerseyNumber(player.identificationNumber)}` : ''}
-          </label>
-        ))}
-        <OfficialEntryForm disabled={managerSubmitting} onAdd={(official) => {
-          if (presentOfficials.some((entry) => entry.role === official.role && entry.identificationNumber === official.identificationNumber)) {
-            throw new Error('Ese directivo ya está incluido en ese cargo.');
-          }
-          setPresentOfficials((current) => [...current, official]);
-        }} />
+        {!availableSubstitutes.length ? <p className="baseballHint">No hay jugadores fuera del lineup disponibles como suplentes.</p> : null}
+        {matchRoster ? <details className="baseballStaffPresence"><summary>Personal técnico presente (opcional)</summary>
+          <p className="baseballHint">Marca al personal que acompaña al equipo. Su cargo y su inscripción no cambian.</p>
+          <div className="baseballBenchGrid">{matchRoster.members.map(row => {
+            const staffRole = row.role;
+            if (!isPresentOfficialRole(staffRole)) return null;
+            const aliases = [normalizeCedula(row.person.id), normalizeCedula(row.person.identification)];
+            const present = presentOfficials.some(item => item.role === staffRole && aliases.includes(normalizeCedula(item.identificationNumber)));
+            return <label className={`baseballBenchPlayer${present ? ' is-present' : ''}`} key={row.person.id}>
+              <input type="checkbox" checked={present} aria-label={`Presente en este partido: ${row.person.fullName}`}
+                disabled={managerSubmitting || protestLocked} onChange={event => setPresentOfficials(current => event.target.checked ?
+                  [...current, { role: staffRole, identificationNumber: row.person.id, displayName: row.person.fullName }] :
+                  current.filter(item => !(item.role === staffRole && aliases.includes(normalizeCedula(item.identificationNumber)))))} />
+              <span className="baseballBenchIdentity"><strong>{row.person.fullName}</strong><small>{rosterRoleLabels[staffRole]}</small></span>
+              <span className="baseballBenchPresence">{present ? 'Presente' : 'Marcar presente'}</span>
+            </label>;
+          })}</div>
+        </details> : null}
         <ul>{presentOfficials.map((official) => <li key={`${official.role}:${official.identificationNumber}`}>
           {officialRoleLabels[official.role]} · {official.displayName} · {official.identificationNumber}
           <button type="button" className="chipSubtle" disabled={managerSubmitting} onClick={() => setPresentOfficials((current) => current.filter((entry) => entry !== official))}>Quitar de los presentes</button>
         </li>)}</ul>
-        <p>El envío comparte la alineación y el personal presente. Después de entregada, el anotador u organizador registra las sustituciones y nuevas llegadas que le comuniques en el campo. Aquí consultarás el partido oficial en vivo.</p>
+        <p>El envío comparte la alineación y el personal presente. Antes de iniciar el partido puedes cancelar la entrega y rehacerla; una vez iniciado, el anotador u organizador registra las sustituciones y nuevas llegadas que le comuniques en el campo.</p>
         <button
           type="button"
           className="managerButtonOutline"
-          disabled={managerSubmitting || !managerContextReady}
+          disabled={managerSubmitting || !managerContextReady || protestLocked}
           aria-busy={managerSubmitting}
           onClick={submitLineupToGame}
         >
           {managerSubmitting ? 'Enviando alineación…' : 'Enviar alineación con posiciones'}
         </button>
-        {statusNotice}
       </article>
       )}
 
       </>
       ) : null}
     </section>
-    </>
+    </div>
   );
 }
