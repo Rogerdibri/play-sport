@@ -19,6 +19,7 @@ type Options = { path: string; now?: () => number };
 type StoredAccount = { id: string; email: string; display_name: string; password_hash: string; created_at: number };
 const absoluteSessionMs = 400 * 24 * 60 * 60 * 1000;
 const idleSessionMs = 30 * 24 * 60 * 60 * 1000;
+const passwordResetMs = 30 * 60 * 1000;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const invalidSession = () => new UnauthorizedException('La sesión no es válida o venció. Inicia sesión.');
 const hasControls = (value: string) => [...value].some(character => {
@@ -63,6 +64,11 @@ export class AccountsService implements OnModuleDestroy {
       CREATE TABLE IF NOT EXISTS account_attempts (
         key TEXT PRIMARY KEY, started_at INTEGER NOT NULL, hits INTEGER NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS account_password_resets (
+        token_hash TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS account_password_resets_owner ON account_password_resets(account_id);
       CREATE TABLE IF NOT EXISTS account_photos (
         account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
         photo TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), updated_at INTEGER NOT NULL
@@ -662,6 +668,39 @@ export class AccountsService implements OnModuleDestroy {
         .run(nextHash, row.id, row.password_hash);
       if (changed.changes !== 1) throw invalidSession();
       this.db.prepare('DELETE FROM account_sessions WHERE account_id = ?').run(row.id);
+      return this.session({ ...row, password_hash: nextHash });
+    });
+  }
+
+  requestPasswordReset(body: unknown, remoteAddress: string): { email: string; displayName: string; token: string } | null {
+    const email = this.email(this.fields(body, ['email']).email);
+    this.attempt(`reset-ip:${remoteAddress}`, 10);
+    this.attempt(`reset-email:${email}`, 3);
+    const row = this.account(this.db.prepare('SELECT * FROM accounts WHERE email = ?').get(email));
+    if (!row) return null;
+    const token = randomBytes(32).toString('base64url'), now = this.now();
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM account_password_resets WHERE account_id = ? OR expires_at <= ?').run(row.id, now);
+      this.db.prepare('INSERT INTO account_password_resets VALUES(?,?,?,?)').run(digest(token), row.id, now, now + passwordResetMs);
+    });
+    return { email: row.email, displayName: row.display_name, token };
+  }
+
+  async confirmPasswordReset(body: unknown, remoteAddress: string) {
+    this.attempt(`reset-confirm:${remoteAddress}`, 20);
+    const fields = this.fields(body, ['token', 'newPassword']);
+    const expired = () => new BadRequestException('El enlace no es válido o venció. Solicita uno nuevo desde «Olvidé mi contraseña».');
+    if (typeof fields.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(fields.token)) throw expired();
+    const token = fields.token, nextHash = await this.encode(this.password(fields.newPassword, true));
+    return this.transaction(() => {
+      const reset = this.db.prepare('SELECT account_id, expires_at FROM account_password_resets WHERE token_hash = ?').get(digest(token));
+      if (!reset || typeof reset.expires_at !== 'number' || reset.expires_at <= this.now()) throw expired();
+      const row = this.account(this.db.prepare('SELECT * FROM accounts WHERE id = ?').get(reset.account_id));
+      if (!row) throw expired();
+      this.db.prepare('UPDATE accounts SET password_hash = ? WHERE id = ?').run(nextHash, row.id);
+      this.db.prepare('DELETE FROM account_password_resets WHERE account_id = ?').run(row.id);
+      this.db.prepare('DELETE FROM account_sessions WHERE account_id = ?').run(row.id);
+      this.db.prepare('DELETE FROM account_attempts WHERE key = ?').run(digest(`login-email:${row.email}`));
       return this.session({ ...row, password_hash: nextHash });
     });
   }

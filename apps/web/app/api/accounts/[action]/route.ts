@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { proxyJsonService } from '../../service-proxy';
 
 export const dynamic = 'force-dynamic';
-const actions = new Set(['me', 'register', 'login', 'logout', 'password', 'photo', 'identity', 'identity-requests', 'identity-evidence', 'identity-review', 'profile', 'scorecards', 'administration', 'access', 'activate-role', 'scorekeeper-extras']);
+const actions = new Set(['me', 'register', 'login', 'logout', 'password', 'password-reset', 'password-reset-confirm', 'photo', 'identity', 'identity-requests', 'identity-evidence', 'identity-review', 'profile', 'scorecards', 'administration', 'access', 'activate-role', 'scorekeeper-extras']);
 
 async function handle(request: NextRequest, context: { params: Promise<{ action: string }> }) {
   const { action } = await context.params;

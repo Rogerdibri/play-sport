@@ -1,12 +1,15 @@
-import { BadRequestException, Body, Controller, ForbiddenException, Get, HttpCode, Post, Req, Res, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, HttpCode, Logger, Post, Req, Res, Query, ServiceUnavailableException } from '@nestjs/common';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
 import { AccountsService } from './accounts.service';
 import { accountCookieName, accountToken, assertAccountOrigin } from './account-http';
+import { PasswordResetMailer } from './password-reset-mailer';
 
 @Controller('accounts')
 export class AccountsController {
   private readonly accounts: AccountsService;
+  private readonly mailer = new PasswordResetMailer();
+  private readonly logger = new Logger(AccountsController.name);
   constructor(accounts: AccountsService) { this.accounts = accounts; }
   @Get('scorekeeper-extras')
   scorekeeperExtras(@Req() req: IncomingMessage, @Res({ passthrough: true }) res: ServerResponse, @Query() query: Record<string, unknown>) {
@@ -169,6 +172,26 @@ export class AccountsController {
   async password(@Req() request: IncomingMessage, @Res({ passthrough: true }) response: ServerResponse, @Body() body: unknown) {
     this.origin(request);
     const result = await this.accounts.changePassword(this.token(request), body);
+    this.cookie(response, result.token);
+    return { account: result.account };
+  }
+  @Post('password-reset')
+  @HttpCode(200)
+  requestPasswordReset(@Req() request: IncomingMessage, @Res({ passthrough: true }) response: ServerResponse, @Body() body: unknown) {
+    this.origin(request); response.setHeader('Cache-Control', 'no-store');
+    if (process.env.NODE_ENV === 'production' && !this.mailer.configured())
+      throw new ServiceUnavailableException('La recuperación por correo todavía no está configurada. Contacta al administrador.');
+    const reset = this.accounts.requestPasswordReset(body, this.address(request));
+    // Sent without awaiting so existing and unknown emails answer in the same time.
+    if (reset) void this.mailer.send(reset.email, reset.displayName, reset.token)
+      .catch(error => this.logger.error(`No se pudo enviar el correo de recuperación: ${error instanceof Error ? error.message : error}`));
+    return { message: 'Si existe una cuenta con ese correo, te enviamos un enlace para elegir una nueva contraseña. Vence en 30 minutos; revisa también la carpeta de spam.' };
+  }
+  @Post('password-reset-confirm')
+  @HttpCode(200)
+  async confirmPasswordReset(@Req() request: IncomingMessage, @Res({ passthrough: true }) response: ServerResponse, @Body() body: unknown) {
+    this.origin(request);
+    const result = await this.accounts.confirmPasswordReset(body, this.address(request));
     this.cookie(response, result.token);
     return { account: result.account };
   }

@@ -32,7 +32,7 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
   const { clear, ready } = usePlatformSession();
   const [account, setAccount] = useState<AccountProfile | null>(null);
   const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
   const [email, setEmail] = useState(''), [name, setName] = useState(''), [password, setPassword] = useState('');
   const [currentPassword, setCurrentPassword] = useState(''), [nextPassword, setNextPassword] = useState(''), [confirmation, setConfirmation] = useState('');
   const [error, setError] = useState(''), [notice, setNotice] = useState(''), [attempt, setAttempt] = useState(0);
@@ -75,6 +75,19 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    if (mode === 'forgot') {
+      if (sending.current) return;
+      sending.current = true; setBusy(true); setError(''); setNotice('');
+      void fetch('/api/accounts/password-reset', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }) }).then(async response => {
+        const result: unknown = await response.json().catch(() => null);
+        const message = result && typeof result === 'object' && 'message' in result && typeof result.message === 'string' ? result.message : '';
+        if (!response.ok) throw new Error(message || 'No se pudo solicitar el enlace. Vuelve a intentarlo.');
+        setNotice(message);
+      }).catch(failure => setError(failure instanceof Error ? failure.message : 'No se pudo solicitar el enlace.'))
+        .finally(() => { sending.current = false; setBusy(false); });
+      return;
+    }
     void run(async () => {
       const value = await requestAccount(mode, { email, password, ...(mode === 'register' ? { displayName: name } : {}) });
       if (!value) throw new Error('No se encontró la cuenta confirmada.');
@@ -92,7 +105,7 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
     {error ? <p className="managerWarning" role="alert">{error}</p> : null}
     {notice ? <p className="managerStatus success" role="status">{notice}</p> : null}
     {loading ? <p role="status">Consultando tu sesión…</p> : !account ? <section className="managerCard managerStepCard">
-      <h2>{mode === 'register' ? 'Crear mi cuenta' : 'Iniciar sesión'}</h2>
+      <h2>{mode === 'register' ? 'Crear mi cuenta' : mode === 'forgot' ? 'Recuperar mi contraseña' : 'Iniciar sesión'}</h2>
       <form onSubmit={submit}>
         <fieldset className="accountFields" disabled={busy}>
           {mode === 'register' ? <label className="managerField"><span>Nombre público</span>
@@ -101,18 +114,21 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
           <label className="managerField"><span>Correo electrónico</span>
             <input type="email" autoComplete="email" required maxLength={254} value={email} onChange={event => setEmail(event.target.value)} />
           </label>
+          {mode === 'forgot' ? <p>Te enviaremos un enlace para elegir una nueva contraseña. Vence en 30 minutos y solo sirve una vez.</p> :
           <label className="managerField"><span>Contraseña</span>
             <input type="password" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} required
               minLength={mode === 'register' ? 15 : undefined} maxLength={128} value={password} onChange={event => setPassword(event.target.value)} />
-          </label>
+          </label>}
           {mode === 'register' ? <p>Usa una frase de al menos 15 caracteres. Después deberás completar tu perfil con tu cédula, su imagen y una foto personal para revisión privada.</p> : null}
-          <button className="managerButtonSolid" type="submit" aria-busy={busy}>{busy ? 'Procesando…' : mode === 'register' ? 'Crear cuenta' : 'Entrar a mi cuenta'}</button>
+          <button className="managerButtonSolid" type="submit" aria-busy={busy}>{busy ? 'Procesando…' : mode === 'register' ? 'Crear cuenta' : mode === 'forgot' ? 'Enviarme el enlace' : 'Entrar a mi cuenta'}</button>
         </fieldset>
       </form>
       <button type="button" className="managerButtonOutline" disabled={busy} onClick={() => {
         setMode(mode === 'login' ? 'register' : 'login'); setPassword(''); setError(''); setNotice('');
       }}>{mode === 'login' ? 'Quiero crear una cuenta' : 'Ya tengo cuenta'}</button>
-      <p>Recuperación de contraseña por correo: pendiente de configurar el servicio de envío. No existe un acceso alternativo que omita tu contraseña.</p>
+      {mode === 'login' ? <button type="button" className="managerButtonOutline" disabled={busy} onClick={() => {
+        setMode('forgot'); setPassword(''); setError(''); setNotice('');
+      }}>Olvidé mi contraseña</button> : null}
       {error ? <button type="button" className="managerButtonOutline" disabled={busy} onClick={() => setAttempt(value => value + 1)}>Reintentar conexión</button> : null}
     </section> : <>
       {section === 'profile' ? <>

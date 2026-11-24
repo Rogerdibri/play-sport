@@ -30,7 +30,7 @@ test('anonymous and authenticated forms expose correct password fields without s
   const html = render();
   assert.match(html, /Iniciar sesión/); assert.match(html, /type="password"/);
   assert.match(html, /autoComplete="current-password"/); assert.match(html, /Quiero crear una cuenta/);
-  assert.match(html, /Recuperación de contraseña por correo: pendiente/);
+  assert.match(html, /Olvidé mi contraseña/);
   index = 0;
   t.mock.method(React, 'useState', initial => index++ === 0 ? [account, () => {}] : index === 2 ? [false, () => {}] : useState(initial));
   const authenticated = renderAccess();

@@ -206,6 +206,67 @@ test('rate limits persist after restart and recover after the window instead of 
   await rejects(() => e.reopen().login({ email: 'missing@example.test', password: 'contraseña inexistente' }, 'local'), 401);
 });
 
+test('password reset links are single-use, expire in 30 minutes, replace older links and revoke every session', async t => {
+  const e = setup(t), input = registration();
+  const registered = await e.service.register(input, 'one');
+  assert.equal(e.service.requestPasswordReset({ email: 'missing@example.test' }, 'ip'), null);
+  const first = e.service.requestPasswordReset({ email: ' CUENTA@example.test ' }, 'ip');
+  assert.equal(first.email, input.email); assert.match(first.token, /^[A-Za-z0-9_-]{43}$/);
+  const second = e.service.requestPasswordReset({ email: input.email }, 'ip');
+  const nextPassword = 'Una frase nueva para recuperar 456';
+  await rejects(() => e.service.confirmPasswordReset({ token: first.token, newPassword: nextPassword }, 'ip'), 400);
+  await rejects(() => e.service.confirmPasswordReset({ token: second.token, newPassword: 'corta' }, 'ip'), 400);
+  const confirmed = await e.service.confirmPasswordReset({ token: second.token, newPassword: nextPassword }, 'ip');
+  assert.equal(confirmed.account.id, registered.account.id);
+  bad(() => e.service.authenticate(registered.token), 401);
+  assert.equal(e.service.authenticate(confirmed.token).id, registered.account.id);
+  await rejects(() => e.service.confirmPasswordReset({ token: second.token, newPassword: 'Otra frase nueva para recuperar 789' }, 'ip'), 400);
+  await rejects(() => e.service.login({ email: input.email, password: input.password }, 'ip'), 401);
+  await e.service.login({ email: input.email, password: nextPassword }, 'ip');
+  const expired = e.service.requestPasswordReset({ email: input.email }, 'ip');
+  e.clock(30 * 60 * 1000);
+  await rejects(() => e.service.confirmPasswordReset({ token: expired.token, newPassword: 'Otra frase nueva para recuperar 789' }, 'ip'), 400);
+  await rejects(() => e.service.confirmPasswordReset({ token: 'forged', newPassword: 'Otra frase nueva para recuperar 789' }, 'ip'), 400);
+  const db = new DatabaseSync(e.path, { readOnly: true });
+  try { assert.equal(db.prepare('SELECT token_hash FROM account_password_resets').all().some(row => row.token_hash === expired.token), false); }
+  finally { db.close(); }
+});
+
+test('password reset requests are limited per email and per address and reject unexpected fields', async t => {
+  const e = setup(t);
+  await e.service.register(registration(), 'one');
+  for (let count = 0; count < 3; count++) assert.ok(e.service.requestPasswordReset({ email: registration().email }, `ip-${count}`));
+  bad(() => e.service.requestPasswordReset({ email: registration().email }, 'ip-other'), 429);
+  for (let count = 0; count < 10; count++) e.service.requestPasswordReset({ email: `nadie${count}@example.test` }, 'same-ip');
+  bad(() => e.service.requestPasswordReset({ email: 'otra@example.test' }, 'same-ip'), 429);
+  bad(() => e.service.requestPasswordReset({ email: 'x@example.test', accountId: 'other' }, 'fields'), 400);
+});
+
+test('password reset HTTP routes answer the same for unknown emails and sign in after confirming', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'playsport-account-reset-'));
+  const service = new AccountsService({ path: join(directory, 'accounts.sqlite') });
+  class TestModule {}
+  Module({ controllers: [AccountsController], providers: [{ provide: AccountsService, useValue: service }] })(TestModule);
+  const app = await NestFactory.create(TestModule, { logger: false });
+  app.setGlobalPrefix('api');
+  await app.listen(0, '127.0.0.1');
+  t.after(async () => { await app.close(); rmSync(directory, { recursive: true, force: true }); });
+  const base = `${await app.getUrl()}/api/accounts`;
+  const send = (path, body, origin = 'http://localhost:3000') => fetch(`${base}/${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) });
+  await service.register(registration(), 'one');
+  assert.equal((await send('password-reset', { email: registration().email }, 'http://attacker.example')).status, 403);
+  const known = await send('password-reset', { email: registration().email });
+  const unknown = await send('password-reset', { email: 'missing@example.test' });
+  assert.equal(known.status, 200); assert.equal(unknown.status, 200);
+  assert.deepEqual(await known.json(), await unknown.json());
+  const { token } = service.requestPasswordReset({ email: registration().email }, 'direct');
+  const confirmed = await send('password-reset-confirm', { token, newPassword: 'Una frase nueva para recuperar 456' });
+  assert.equal(confirmed.status, 200);
+  assert.match(confirmed.headers.get('set-cookie'), /HttpOnly; SameSite=Strict/);
+  assert.equal((await confirmed.json()).account.email, registration().email);
+});
+
 test('HTTP account routes enforce origin, cookie authentication, revocation and unavailable financial features', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'playsport-account-http-'));
   const service = new AccountsService({ path: join(directory, 'accounts.sqlite') });
