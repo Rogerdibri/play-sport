@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { passwordPolicyHint, passwordPolicyProblem } from '@playsport/shared';
 import { notifyAccountChange } from '../../account-events';
 import { useNavigationBusy } from '../../navigation-hooks';
 
@@ -24,6 +25,8 @@ export default function PasswordResetPage() {
     event.preventDefault();
     if (sending.current || !token) return;
     if (password !== confirmation) { setError('La nueva contraseña y su confirmación no coinciden.'); return; }
+    const problem = passwordPolicyProblem(password);
+    if (problem) { setError(problem); return; }
     sending.current = true; setBusy(true); setError('');
     void fetch('/api/accounts/password-reset-confirm', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token, newPassword: password }) }).then(async response => {
@@ -52,12 +55,12 @@ export default function PasswordResetPage() {
       <form onSubmit={submit}>
         <fieldset className="accountFields" disabled={busy}>
           <label className="managerField"><span>Nueva contraseña</span>
-            <input type="password" autoComplete="new-password" required minLength={15} maxLength={128} value={password} onChange={event => setPassword(event.target.value)} />
+            <input type="password" autoComplete="new-password" required minLength={8} maxLength={128} value={password} onChange={event => setPassword(event.target.value)} />
           </label>
           <label className="managerField"><span>Confirmar nueva contraseña</span>
-            <input type="password" autoComplete="new-password" required minLength={15} maxLength={128} value={confirmation} onChange={event => setConfirmation(event.target.value)} />
+            <input type="password" autoComplete="new-password" required minLength={8} maxLength={128} value={confirmation} onChange={event => setConfirmation(event.target.value)} />
           </label>
-          <p>Usa una frase de al menos 15 caracteres.</p>
+          <p>{passwordPolicyHint}</p>
           <button className="managerButtonSolid" type="submit" aria-busy={busy}>{busy ? 'Guardando…' : 'Guardar nueva contraseña'}</button>
         </fieldset>
       </form>

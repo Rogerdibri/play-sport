@@ -32,7 +32,7 @@ if (existsSync(path)) {
     typeof vendor.email === 'string' && Number.isFinite(vendor.seedTime), 'La configuración privada del vendedor de pruebas es inválida.');
 } else {
   vendor = { version: 1, email: 'vendedor-marketplace@playsport.example.test', displayName: 'Tienda ficticia PlaySport',
-    password: 'Vendedor-' + randomBytes(24).toString('base64url'), seedTime: Date.now() };
+    password: 'Vendedor-1' + randomBytes(24).toString('base64url'), seedTime: Date.now() };
   const result = await call('accounts/register', { email: vendor.email, displayName: vendor.displayName, password: vendor.password });
   vendor.accountId = result.account.id;
   writeFileSync(path, JSON.stringify(vendor, null, 2), { mode: 0o600, flag: 'wx' });

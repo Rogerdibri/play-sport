@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'no
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { readAccountPhoto, readAccountPhotoChange, readDemoProfiles, newDemoPersonalProfile, demoProfileLocation, readFavoriteChange, readFavoriteRef, type FavoriteTarget, type AccountProfile } from '@playsport/shared';
+import { readAccountPhoto, readAccountPhotoChange, readDemoProfiles, newDemoPersonalProfile, demoProfileLocation, readFavoriteChange, readFavoriteRef, passwordPolicyHint, passwordPolicyProblem, type FavoriteTarget, type AccountProfile } from '@playsport/shared';
 import { AccountIdentities } from './account-identities';
 import { AccountTrials } from './account-trials';
 import { AccountRoleValidity } from './account-role-validity';
@@ -510,10 +510,11 @@ export class AccountsService implements OnModuleDestroy {
   }
 
   private password(value: unknown, creating: boolean): string {
-    if (typeof value !== 'string' || value.length > 128 || hasControls(value) ||
-        [...value].length < (creating ? 15 : 1)) {
-      throw new BadRequestException(creating ? 'Usa una contraseña de 15 a 128 caracteres; puedes usar una frase.' : 'Indica tu contraseña.');
+    if (typeof value !== 'string' || value.length > 128 || hasControls(value) || !value) {
+      throw new BadRequestException(creating ? passwordPolicyHint : 'Indica tu contraseña.');
     }
+    const problem = creating ? passwordPolicyProblem(value) : null;
+    if (problem) throw new BadRequestException(problem);
     return value;
   }
 

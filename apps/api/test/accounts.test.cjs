@@ -197,6 +197,17 @@ test('logout is idempotent, sessions expire by idle time and absolute time, and 
   bad(() => e.service.authenticate(last.token), 401);
 });
 
+test('new passwords need 8 to 128 characters with an uppercase letter, a number and a special character', async t => {
+  const e = setup(t);
+  for (const password of ['Ab1!xyz', 'abcdef1!', 'Abcdefg!', 'Abcdefg1', 'ABCDEFGH', `A1!${'x'.repeat(126)}`])
+    await rejects(() => e.service.register({ ...registration(`r${password.length}${password[1]}@example.test`), password }, `policy-${password}`), 400);
+  for (const [index, password] of ['Abcdef1!', 'Clave 2026', 'Ñandú-7x', `A1!${'x'.repeat(125)}`].entries())
+    assert.equal((await e.service.register({ ...registration(`ok${index}@example.test`), password }, `ok-${index}`)).account.email, `ok${index}@example.test`);
+  const login = await e.service.login({ email: 'ok0@example.test', password: 'Abcdef1!' }, 'login');
+  await rejects(() => e.service.changePassword(login.token, { currentPassword: 'Abcdef1!', newPassword: 'sinmayuscula1!' }), 400);
+  await e.service.changePassword(login.token, { currentPassword: 'Abcdef1!', newPassword: 'Nueva#2026' });
+});
+
 test('rate limits persist after restart and recover after the window instead of trusting browser state', async t => {
   const e = setup(t);
   for (let count = 0; count < 10; count++) await rejects(() =>

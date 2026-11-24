@@ -655,7 +655,8 @@ La primera etapa usa SQLite persistente en
 `apps/api/.local/accounts/accounts.sqlite` al ejecutar la API desde su workspace.
 El archivo se puede configurar con `PLAYSPORT_ACCOUNTS_PATH`; `.local/` está
 excluido de Git. Las contraseñas se guardan con scrypt, salt aleatorio y
-comparación constante; se requieren de 15 a 128 caracteres al crearlas.
+comparación constante; al crearlas se requieren de 8 a 128 caracteres con al menos una
+mayúscula, un número y un carácter especial (cualquier símbolo o espacio).
 Los tokens de sesión se guardan únicamente como hashes. El navegador recibe
 una cookie HttpOnly/SameSite=Strict, nunca un token en localStorage.
 Las sesiones se conservan en el dispositivo hasta cerrar sesión, 30 días sin

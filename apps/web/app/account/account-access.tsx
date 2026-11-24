@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { accountChangedEvent, accountChangedKey, accountPhotoChangedEvent, accountPhotoChangedKey, readAccountProfile, type AccountProfile } from '@playsport/shared';
+import { accountChangedEvent, accountChangedKey, accountPhotoChangedEvent, accountPhotoChangedKey, passwordPolicyHint, passwordPolicyProblem, readAccountProfile, type AccountProfile } from '@playsport/shared';
 import AccountPhotoEditor from '../account-photo-editor';
 import AccountAvatar from '../account-avatar';
 import { notifyAccountChange } from '../account-events';
@@ -89,6 +89,8 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
       return;
     }
     void run(async () => {
+      const problem = mode === 'register' ? passwordPolicyProblem(password) : null;
+      if (problem) throw new Error(problem);
       const value = await requestAccount(mode, { email, password, ...(mode === 'register' ? { displayName: name } : {}) });
       if (!value) throw new Error('No se encontró la cuenta confirmada.');
       setAccount(value); setPassword('');
@@ -117,9 +119,9 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
           {mode === 'forgot' ? <p>Te enviaremos un enlace para elegir una nueva contraseña. Vence en 30 minutos y solo sirve una vez.</p> :
           <label className="managerField"><span>Contraseña</span>
             <input type="password" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} required
-              minLength={mode === 'register' ? 15 : undefined} maxLength={128} value={password} onChange={event => setPassword(event.target.value)} />
+              minLength={mode === 'register' ? 8 : undefined} maxLength={128} value={password} onChange={event => setPassword(event.target.value)} />
           </label>}
-          {mode === 'register' ? <p>Usa una frase de al menos 15 caracteres. Después deberás completar tu perfil con tu cédula, su imagen y una foto personal para revisión privada.</p> : null}
+          {mode === 'register' ? <p>{passwordPolicyHint} Después deberás completar tu perfil con tu cédula, su imagen y una foto personal para revisión privada.</p> : null}
           <button className="managerButtonSolid" type="submit" aria-busy={busy}>{busy ? 'Procesando…' : mode === 'register' ? 'Crear cuenta' : mode === 'forgot' ? 'Enviarme el enlace' : 'Entrar a mi cuenta'}</button>
         </fieldset>
       </form>
@@ -162,6 +164,8 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
           event.preventDefault();
           void run(async () => {
             if (nextPassword !== confirmation) throw new Error('La nueva contraseña y su confirmación no coinciden.');
+            const problem = passwordPolicyProblem(nextPassword);
+            if (problem) throw new Error(problem);
             const value = await requestAccount('password', { currentPassword, newPassword: nextPassword });
             if (!value) throw new Error('No se pudo confirmar el cambio de contraseña.');
             setAccount(value); setCurrentPassword(''); setNextPassword(''); setConfirmation('');
@@ -171,10 +175,11 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
           <fieldset className="accountFields" disabled={busy}>
             <label className="managerField"><span>Contraseña actual</span><input type="password" autoComplete="current-password" required maxLength={128}
               value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} /></label>
-            <label className="managerField"><span>Nueva contraseña</span><input type="password" autoComplete="new-password" required minLength={15} maxLength={128}
+            <label className="managerField"><span>Nueva contraseña</span><input type="password" autoComplete="new-password" required minLength={8} maxLength={128}
               value={nextPassword} onChange={event => setNextPassword(event.target.value)} /></label>
-            <label className="managerField"><span>Confirmar nueva contraseña</span><input type="password" autoComplete="new-password" required minLength={15} maxLength={128}
+            <label className="managerField"><span>Confirmar nueva contraseña</span><input type="password" autoComplete="new-password" required minLength={8} maxLength={128}
               value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label>
+            <p>{passwordPolicyHint}</p>
             <button type="submit" className="managerButtonSolid" aria-busy={busy}>Actualizar contraseña</button>
           </fieldset>
         </form>

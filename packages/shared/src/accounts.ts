@@ -21,6 +21,15 @@ export const accountChangedKey = 'playsport:account-changed:v1';
 export const accountPhotoChangedEvent = 'playsport:account-photo-changed';
 export const accountPhotoChangedKey = 'playsport:account-photo-changed:v1';
 export const accountPhotoMaxLength = 90000;
+export const passwordPolicyHint = 'Usa de 8 a 128 caracteres con al menos una mayúscula, un número y un carácter especial (por ejemplo ! @ # $ % - _ . o un espacio).';
+export function passwordPolicyProblem(value: string): string | null {
+  const length = [...value].length;
+  if (length < 8 || length > 128) return 'La contraseña debe tener de 8 a 128 caracteres.';
+  if (!/\p{Lu}/u.test(value)) return 'La contraseña debe tener al menos una letra mayúscula.';
+  if (!/\p{N}/u.test(value)) return 'La contraseña debe tener al menos un número.';
+  if (!/[^\p{L}\p{N}]/u.test(value)) return 'La contraseña debe tener al menos un carácter especial, por ejemplo ! @ # $ % - _ . o un espacio.';
+  return null;
+}
 export type AccountPhotoChange = { requestId: string; expectedAccountId: string; expectedRevision: number; photo: string };
 export function readAccountPhoto(value: unknown): string {
   if (typeof value !== 'string' || value.length > accountPhotoMaxLength ||
