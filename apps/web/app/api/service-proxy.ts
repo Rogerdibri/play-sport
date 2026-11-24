@@ -27,6 +27,11 @@ export async function proxyJsonService(request: NextRequest, url: string, limit:
     const value = request.headers.get(key);
     if (value) headers.set(key, value);
   }
+  // Only headers rewritten by the hosting edge are trusted; never forward the visitor's own forwarding headers.
+  for (const key of (process.env.PLAYSPORT_CLIENT_IP_HEADER ?? '').split(',').map(name => name.trim()).filter(Boolean)) {
+    const value = request.headers.get(key)?.trim();
+    if (value) { headers.set('x-playsport-client-ip', value); break; }
+  }
   try {
     const upstream = await fetch(url, { method: request.method, headers, body, cache: 'no-store',
       redirect: 'error', signal: AbortSignal.timeout(10000) });

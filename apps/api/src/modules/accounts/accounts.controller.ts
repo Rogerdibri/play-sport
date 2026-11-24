@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, ForbiddenException, Get, HttpCode, Post, Req, Res, Query } from '@nestjs/common';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { AccountsService } from './accounts.service';
 import { accountCookieName, accountToken, assertAccountOrigin } from './account-http';
 
@@ -118,8 +119,11 @@ export class AccountsController {
   }
 
   private address(request: IncomingMessage): string {
-    if (!request.socket.remoteAddress) throw new ForbiddenException('No se pudo verificar el origen de la conexión.');
-    return request.socket.remoteAddress;
+    const socket = request.socket.remoteAddress;
+    if (!socket) throw new ForbiddenException('No se pudo verificar el origen de la conexión.');
+    const forwarded = request.headers['x-playsport-client-ip'];
+    if (['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(socket) && typeof forwarded === 'string' && isIP(forwarded)) return forwarded;
+    return socket;
   }
 
   private cookie(response: ServerResponse, token: string, clear = false, persistent = false) {
