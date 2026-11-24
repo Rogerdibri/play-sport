@@ -1360,6 +1360,24 @@ docker compose up -d
 cd apps/api && npx prisma migrate dev --name init && cd ../..
 ```
 
+## Publicación en internet (Render)
+
+Web y API se ejecutan juntas en un solo contenedor ([Dockerfile](Dockerfile),
+[scripts/start-production.mjs](scripts/start-production.mjs)); solo la web es pública
+y reenvía a la API por `localhost:4000`. Todas las bases privadas (`.local/`) viven en
+el disco persistente `/data`, que sobrevive a cada actualización.
+
+1. En Render: **New → Blueprint**, conectar este repositorio y la rama a publicar.
+   [render.yaml](render.yaml) crea el servicio `starter` con su disco de 1 GB.
+2. `PLAYSPORT_WEB_ORIGIN` toma automáticamente la dirección `https://….onrender.com`;
+   con un dominio propio, configúrala con ese origen HTTPS.
+3. Tras crear tu cuenta en la web publicada, copia su UUID en
+   `PLAYSPORT_ADMIN_ACCOUNT_ID` (y, si corresponde, `PLAYSPORT_IDENTITY_REVIEWER_ACCOUNT_ID`).
+4. Cada `git push` a la rama conectada vuelve a desplegar sin borrar cuentas ni partidos.
+
+En producción no existen la cuenta local de pruebas ni los permisos de moderación locales.
+La app Expo usa `EXPO_PUBLIC_PLAYSPORT_WEB_ORIGIN=https://….onrender.com`.
+
 ## Desarrollo
 
 ```bash

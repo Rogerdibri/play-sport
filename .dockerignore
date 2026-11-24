@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/.next
+**/.next-dev
+**/.expo
+**/dist
+**/coverage
+**/*.tsbuildinfo
+**/.local
+.env
+**/.env
+.DS_Store
