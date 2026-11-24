@@ -4,13 +4,36 @@
     "slug": "playsport",
     "version": "0.1.0",
     "orientation": "portrait",
-    "assetBundlePatterns": ["**/*"],
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "android": {
+      "package": "com.playsport.app"
+    },
+    "ios": {
+      "bundleIdentifier": "com.playsport.app"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "plugins": [
-      ["expo-image-picker", {
-        "photosPermission": "Permite elegir una foto para tu perfil de PlaySport.",
-        "cameraPermission": false,
-        "microphonePermission": false
-      }]
-    ]
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Permite elegir una foto para tu perfil de PlaySport.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "425cdc32-450c-4d6e-af0a-80bf1e533548"
+      }
+    },
+    "owner": "rogerdibri",
+    "updates": {
+      "url": "https://u.expo.dev/425cdc32-450c-4d6e-af0a-80bf1e533548"
+    }
   }
 }
