@@ -18,6 +18,7 @@ test('one authenticated account exposes the same four sections with or without a
     assert.equal((html.match(/class="accountHubCard"/g) ?? []).length, 4);
     assert.match(html, /class="managerButtonOutline accountHubMobileAccess" href="\/favorites">Mis favoritos/);
     assert.match(html, /Cuenta de revisión/);
+    assert.match(html, />Cerrar sesión<\/button>/);
     assert.doesNotMatch(html, /Iniciar sesión|type="password"|Saldo disponible|Cambiar contraseña/);
   }
 });

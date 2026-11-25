@@ -27,14 +27,14 @@ test('anonymous and authenticated forms expose correct password fields without s
   t.mock.method(navigation, 'useNavigationBusy', () => {});
   const useState = React.useState; let index = 0;
   t.mock.method(React, 'useState', initial => index++ === 1 ? [false, () => {}] : useState(initial));
-  const html = render();
+  const html = renderAccess();
   assert.match(html, /Iniciar sesión/); assert.match(html, /type="password"/);
   assert.match(html, /autoComplete="current-password"/); assert.match(html, /Quiero crear una cuenta/);
   assert.match(html, /Olvidé mi contraseña/);
   index = 0;
   t.mock.method(React, 'useState', initial => index++ === 0 ? [account, () => {}] : index === 2 ? [false, () => {}] : useState(initial));
   const authenticated = renderAccess();
-  assert.match(authenticated, /Cerrar sesión de mi cuenta/); assert.match(authenticated, /Cambiar contraseña/);
+  assert.doesNotMatch(authenticated, /Cerrar sesión de mi cuenta/); assert.match(authenticated, /Cambiar contraseña/);
   assert.match(authenticated, /No verificado/); assert.match(authenticated, /Desactivados/);
   assert.match(authenticated, /passkeys, huella o reconocimiento facial todavía no está habilitado/);
   assert.doesNotMatch(authenticated, /href="\/wallet"|Enviar identidad a revisión/);
@@ -49,7 +49,7 @@ test('authenticated local testers are not incorrectly told that their session ex
   assert.match(html, /sesión persistente/i);
   assert.match(html, /no vence por inactividad/);
   assert.doesNotMatch(html, /La sesión vence tras 30 minutos/);
-  assert.match(html, /Cerrar sesión de mi cuenta/);
+  assert.doesNotMatch(html, /Cerrar sesión de mi cuenta/);
 });
 test('reader refuses verification or financial access claims that are not implemented', () => {
   assert.deepEqual(readAccountProfile(account), account);

@@ -1,13 +1,29 @@
 'use client';
 
 import Link from 'next/link';
+import { useRef, useState } from 'react';
 import AccountAvatar from '../account-avatar';
 import { accountSections } from '../account-navigation';
+import { notifyAccountChange } from '../account-events';
+import { useNavigationBusy } from '../navigation-hooks';
 import { usePlatformSession } from '../platform-session';
-import AccountAccess from './account-access';
+import AccountAccess, { requestAccount } from './account-access';
 
 export default function AccountPage() {
   const { account, ready } = usePlatformSession();
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const sending = useRef(false);
+  useNavigationBusy(busy);
+  const logout = async () => {
+    if (sending.current) return;
+    sending.current = true; setBusy(true); setError('');
+    try {
+      await requestAccount('logout', {});
+      notifyAccountChange();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'No se pudo cerrar la sesión. Vuelve a intentarlo.');
+    } finally { sending.current = false; setBusy(false); }
+  };
   if (!ready) return <main className="moduleView"><p role="status">Abriendo Mi cuenta…</p></main>;
   if (!account) return <AccountAccess />;
   return <main className="moduleView accountHub">
@@ -30,6 +46,10 @@ export default function AccountPage() {
     <Link href="/account/saved-games" className="managerButtonOutline">Mis partidos privados y datos anteriores</Link>
     <Link href="/account/access" className="managerButtonOutline">Mis planes y accesos de prueba</Link>
     {account.administrationAccess ? <Link href="/admin" className="managerButtonSolid">Administración de PlaySport</Link> : null}
+    {error ? <p className="managerWarning" role="alert">{error}</p> : null}
+    <button type="button" className="managerButtonOutline" disabled={busy} aria-busy={busy} onClick={() => void logout()}>
+      {busy ? 'Cerrando sesión…' : 'Cerrar sesión'}
+    </button>
     <p className="accountHubNote">Elegir un rol no cambia tu cuenta ni concede permisos adicionales.
       Las operaciones con dinero real siguen deshabilitadas.</p>
   </main>;

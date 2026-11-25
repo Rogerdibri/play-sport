@@ -30,6 +30,19 @@ export class AccountsController {
     res.setHeader('Cache-Control', 'private, no-store');
     return this.accounts.administration(this.token(req), query);
   }
+  @Get('draft-prices')
+  draftPrices(@Req() req: IncomingMessage, @Res({ passthrough: true }) res: ServerResponse, @Query() query: Record<string, unknown>) {
+    res.setHeader('Cache-Control', 'private, no-store');
+    if (Object.keys(query).length) throw new BadRequestException('La consulta de precios no admite parámetros.');
+    return this.accounts.draftPrices(this.token(req));
+  }
+  @Post('draft-prices')
+  @HttpCode(200)
+  saveDraftPrice(@Req() req: IncomingMessage, @Res({ passthrough: true }) res: ServerResponse, @Query() query: Record<string, unknown>, @Body() body: unknown) {
+    this.origin(req); res.setHeader('Cache-Control', 'private, no-store');
+    if (Object.keys(query).length) throw new BadRequestException('La modificación de precios no admite parámetros.');
+    return this.accounts.saveDraftPrice(this.token(req), body);
+  }
   @Post('administration')
   @HttpCode(200)
   changeTrial(@Req() req: IncomingMessage, @Res({ passthrough: true }) res: ServerResponse, @Body() body: unknown, @Query() query: Record<string, unknown>) {

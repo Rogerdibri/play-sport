@@ -99,9 +99,11 @@ a {
 .adminTrialFields { display: grid; gap: 12px; min-width: 0; margin: 0; padding: 0; border: 0; }
 .adminTrialFields .managerField { min-width: 0; }
 .adminTrialFields textarea, .adminTrialFields input, .adminTrialFields select { width: 100%; max-width: 100%; min-width: 0; }
+.adminPriceSelectors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; min-width: 0; }
 .administrationPage button, .administrationPage input, .administrationPage select { min-height: 44px; }
 @media (max-width: 640px) {
 	.adminUserGrid { grid-template-columns: minmax(0, 1fr); }
+	.adminPriceSelectors { grid-template-columns: minmax(0, 1fr); }
 	.administrationPage .managerCard, .administrationPage .moduleHeader { padding: 16px; }
 	.adminTabs > button { flex: 1 1 130px; }
 	.adminSearch > button { width: 100%; }

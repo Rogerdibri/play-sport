@@ -86,6 +86,14 @@ export class AccountsService implements OnModuleDestroy {
     this.db.exec(`CREATE TABLE IF NOT EXISTS account_manager_teams(
       account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
       selection TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0)) STRICT;`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS draft_prices(
+      key TEXT PRIMARY KEY, name TEXT NOT NULL, currency TEXT NOT NULL,
+      amount_cents INTEGER, revision INTEGER NOT NULL CHECK(revision>0), updated_at TEXT NOT NULL,
+      updated_by TEXT NOT NULL REFERENCES accounts(id)) STRICT;
+      CREATE TABLE IF NOT EXISTS draft_price_audit(
+      id INTEGER PRIMARY KEY, price_key TEXT NOT NULL, name TEXT NOT NULL, currency TEXT NOT NULL,
+      amount_cents INTEGER, revision INTEGER NOT NULL, updated_at TEXT NOT NULL,
+      updated_by TEXT NOT NULL REFERENCES accounts(id)) STRICT;`);
     this.db.exec('CREATE TABLE IF NOT EXISTS account_profiles(account_id TEXT PRIMARY KEY REFERENCES accounts(id),document TEXT NOT NULL,revision INTEGER NOT NULL) STRICT;');
     this.db.exec(`CREATE TABLE IF NOT EXISTS account_private_scorecards(
       account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -183,6 +191,37 @@ export class AccountsService implements OnModuleDestroy {
   administration(token: string | undefined, query: Record<string, unknown>) {
     const account = this.administrator(token);
     return this.trials.snapshot(account.id, query);
+  }
+  draftPrices(token: string | undefined) {
+    const account = this.administrator(token);
+    const prices = this.db.prepare('SELECT key,name,currency,amount_cents AS amountCents,revision,updated_at AS updatedAt FROM draft_prices ORDER BY name,key').all();
+    return { accountId: account.id, prices };
+  }
+  saveDraftPrice(token: string | undefined, body: unknown) {
+    const account = this.administrator(token);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new BadRequestException('El precio no es válido.');
+    const input = body as Record<string, unknown>;
+    if (Object.keys(input).some(key => !['expectedAdminId', 'key', 'name', 'currency', 'amountCents', 'expectedRevision'].includes(key)) ||
+      typeof input.key !== 'string' || !/^[a-z0-9:-]{1,100}$/.test(input.key) ||
+      typeof input.name !== 'string' || !input.name.trim() || input.name.length > 150 || hasControls(input.name) ||
+      typeof input.currency !== 'string' || !['USD', 'VES', 'EUR'].includes(input.currency) ||
+      input.amountCents !== null && (typeof input.amountCents !== 'number' || !Number.isSafeInteger(input.amountCents) || input.amountCents < 0 || input.amountCents > 100000000000) ||
+      typeof input.expectedRevision !== 'number' || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
+      throw new BadRequestException('El precio no es válido.');
+    if (input.expectedAdminId !== account.id) throw new ConflictException('La cuenta administradora cambió. Vuelve a abrir el panel.');
+    const key = input.key, name = input.name.trim(), currency = input.currency, amountCents = input.amountCents as number | null, revision = input.expectedRevision + 1;
+    return this.transaction(() => {
+      const current = this.db.prepare('SELECT revision FROM draft_prices WHERE key=?').get(key);
+      if ((current?.revision ?? 0) !== input.expectedRevision) throw new ConflictException('El precio cambió en otro dispositivo. Actualiza antes de guardar.');
+      const updatedAt = new Date(this.now()).toISOString();
+      this.db.prepare(`INSERT INTO draft_prices(key,name,currency,amount_cents,revision,updated_at,updated_by) VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(key) DO UPDATE SET name=excluded.name,currency=excluded.currency,amount_cents=excluded.amount_cents,
+        revision=excluded.revision,updated_at=excluded.updated_at,updated_by=excluded.updated_by`)
+        .run(key, name, currency, amountCents, revision, updatedAt, account.id);
+      this.db.prepare('INSERT INTO draft_price_audit(price_key,name,currency,amount_cents,revision,updated_at,updated_by) VALUES(?,?,?,?,?,?,?)')
+        .run(key, name, currency, amountCents, revision, updatedAt, account.id);
+      return { price: { key, name, currency, amountCents, revision, updatedAt } };
+    });
   }
   changeTrial(token: string | undefined, body: unknown) {
     const account = this.administrator(token);

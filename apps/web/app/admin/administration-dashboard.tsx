@@ -11,10 +11,11 @@ import PlayerPlanLevels from '../account/access/player-plan-levels';
 import ManagerPlanLevels from '../account/access/manager-plan-levels';
 import ScorekeeperPlanLevels from '../account/access/scorekeeper-plan-levels';
 import ScorekeeperExtras from './scorekeeper-extras';
+import DraftPrices from './draft-prices';
 
 const statusLabels = { active: 'Vigente', expired: 'Vencido', revoked: 'Revocado' };
 export default function AdministrationDashboard({ account, example }: { account: AccountProfile; example?: AdministrationSnapshot }) {
-  const [tab, setTab] = useState<'users' | 'plans' | 'audit' | 'identity'>('users');
+  const [tab, setTab] = useState<'users' | 'plans' | 'prices' | 'audit' | 'identity'>('users');
   const [snapshot, setSnapshot] = useState<AdministrationSnapshot | null>(example ?? null);
   const [search, setSearch] = useState(''), [query, setQuery] = useState(''), [page, setPage] = useState(0), [auditPage, setAuditPage] = useState(0);
   const [attempt, setAttempt] = useState(0), [loading, setLoading] = useState(!example), [busy, setBusy] = useState(false);
@@ -83,7 +84,7 @@ export default function AdministrationDashboard({ account, example }: { account:
         {!example ? <Link href="/admin/example" className="managerButtonOutline">Ver ejemplo separado</Link> : <Link href="/admin" className="managerButtonOutline">Ir al panel privado</Link>}</div>
     </header>
     <nav className="managerButtonRow adminTabs" aria-label="Administración">
-      {([['users', 'Usuarios y pruebas'], ['plans', 'Planes y funciones'], ['audit', 'Auditoría'], ['identity', 'Identidades']] as const).map(([id, label]) =>
+      {([['users', 'Usuarios y pruebas'], ['plans', 'Planes y funciones'], ...(!example ? [['prices', 'Precios']] as const : []), ['audit', 'Auditoría'], ['identity', 'Identidades']] as const).map(([id, label]) =>
         <button type="button" key={id} disabled={navigationBlocked} aria-pressed={tab === id}
           className={tab === id ? 'managerButtonSolid' : 'managerButtonOutline'} onClick={() => setTab(id)}>{label}</button>)}
     </nav>
@@ -95,6 +96,7 @@ export default function AdministrationDashboard({ account, example }: { account:
       <button className="managerButtonSolid" disabled={busy} onClick={() => void send(pending)}>Reintentar misma solicitud</button></section> : null}
     {!example ? <button className="managerButtonOutline" disabled={navigationBlocked || loading} onClick={() => setAttempt(value => value + 1)}>
       {loading ? 'Actualizando…' : 'Actualizar panel'}</button> : null}
+    {tab === 'prices' && !example ? <DraftPrices accountId={account.id} /> : null}
     {tab === 'users' ? <>
       <section className="managerCard managerStepCard"><h2>Usuarios registrados</h2>
         <form className="adminSearch" onSubmit={event => { event.preventDefault(); setPage(0); setQuery(search); setSelectedId(null); }}>
@@ -148,7 +150,7 @@ export default function AdministrationDashboard({ account, example }: { account:
     {tab === 'plans' ? <><PlayerPlanLevels /><ManagerPlanLevels /><ScorekeeperPlanLevels />
       {!example ? <ScorekeeperExtras key={account.id} accountId={account.id} /> : null}
       <section className="managerCard managerStepCard"><h2>Catálogo inicial del piloto</h2>
-      <p>Estos planes no tienen precio ni renovación automática. Su catálogo es fijo en esta primera entrega; las pruebas se administran por cuenta.</p>
+      <p>Estos planes no tienen precios publicados ni renovación automática. Su catálogo es fijo en esta primera entrega; las pruebas se administran por cuenta.</p>
       <div className="adminUserGrid">{trialPlans.map(plan => <article className="adminUserCard" key={plan.id}><h3>{plan.name}</h3>
         {plan.features.length ? <ul>{plan.features.map(feature => <li key={feature}>{accessFeatureLabels[feature]}</li>)}</ul> :
           <p>Continuidad del nivel 1 operativo, sin estadísticas premium ni ampliación de cupos.</p>}</article>)}</div>

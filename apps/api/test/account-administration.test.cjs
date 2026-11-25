@@ -37,6 +37,27 @@ async function fixture(t) {
   return { owner, user, directory, friendly: new FriendlyGamesService(join(directory, 'friendly.json')), accounts: () => accounts, command, now: () => now, advance(ms) { now += ms; }, useApp(value) { app = value; },
     reopen() { accounts.onModuleDestroy(); accounts = new AccountsService({ path, now: () => now }); return accounts; } };
 }
+test('draft prices are private, distinguish zero from unset, persist and reject stale edits', async t => {
+  const e = await fixture(t), accounts = e.accounts();
+  bad(() => accounts.draftPrices(undefined), 401);
+  bad(() => accounts.draftPrices(e.user.token), 403);
+  const command = { expectedAdminId: e.owner.account.id, key: 'player-numbers:1', name: 'Jugador Mis números · mensual',
+    currency: 'USD', amountCents: 0, expectedRevision: 0 };
+  bad(() => accounts.saveDraftPrice(e.user.token, command), 403);
+  bad(() => accounts.saveDraftPrice(e.owner.token, { ...command, amountCents: -1 }), 400);
+  bad(() => accounts.saveDraftPrice(e.owner.token, { ...command, currency: 'INVALID' }), 400);
+  bad(() => accounts.saveDraftPrice(e.owner.token, { ...command, published: true }), 400);
+  bad(() => accounts.saveDraftPrice(e.owner.token, { ...command, expectedAdminId: e.user.account.id }), 409);
+  assert.deepEqual(accounts.draftPrices(e.owner.token).prices, []);
+  const saved = accounts.saveDraftPrice(e.owner.token, command);
+  assert.equal(saved.price.amountCents, 0);
+  assert.equal(saved.price.revision, 1);
+  bad(() => accounts.saveDraftPrice(e.owner.token, command), 409);
+  assert.equal(e.reopen().draftPrices(e.owner.token).prices[0].amountCents, 0);
+  const unset = e.accounts().saveDraftPrice(e.owner.token, { ...command, amountCents: null, expectedRevision: 1 });
+  assert.equal(unset.price.amountCents, null);
+  assert.deepEqual(e.accounts().authenticate(e.user.token).features, []);
+});
 test('only an explicit administrator can list accounts or grant trials; no role, money, identity or master privileges are granted', async t => {
   const e = await fixture(t), accounts = e.accounts();
   bad(() => accounts.administration(undefined, {}), 401);
@@ -142,6 +163,15 @@ test('administration HTTP requires session, origin and strict queries; own-acces
   const url = `${await app.getUrl()}/accounts`;
   const owner = { cookie: `playsport-account=${e.owner.token}`, Origin: 'http://localhost:3000', 'Content-Type': 'application/json' };
   const user = { ...owner, cookie: `playsport-account=${e.user.token}` };
+  const draft = { expectedAdminId: e.owner.account.id, key: 'http:test', name: 'Precio de prueba', currency: 'USD', amountCents: 0, expectedRevision: 0 };
+  assert.equal((await fetch(`${url}/draft-prices`)).status, 401);
+  assert.equal((await fetch(`${url}/draft-prices`, { headers: user })).status, 403);
+  assert.equal((await fetch(`${url}/draft-prices?extra=1`, { headers: owner })).status, 400);
+  const postPrice = headers => fetch(`${url}/draft-prices`, { method: 'POST', headers, body: JSON.stringify(draft) });
+  assert.equal((await postPrice({ ...owner, Origin: 'https://foreign.invalid' })).status, 403);
+  const price = await postPrice(owner); assert.equal(price.status, 200);
+  assert.match(price.headers.get('cache-control'), /private.*no-store/);
+  assert.equal((await postPrice(owner)).status, 409);
   assert.equal((await fetch(`${url}/administration`)).status, 401);
   assert.equal((await fetch(`${url}/administration`, { headers: user })).status, 403);
   assert.equal((await fetch(`${url}/administration?page=0&page=1`, { headers: owner })).status, 400);

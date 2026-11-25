@@ -55,8 +55,8 @@ el campo `kind` distingue los tres orígenes dentro de esa respuesta.
 identifica el nivel 3 para conservar el alcance de pruebas anteriores, sus
 revisiones, vencimientos y auditoría, sin reescribir registros. Si ambas pruebas
 están vigentes prevalece el nivel 3; al vencer o revocarse, se conserva el nivel 2
-si todavía está vigente. El básico no requiere una prueba. No hay precios,
-cobros, renovación automática ni editor del catálogo.
+si todavía está vigente. El básico no requiere una prueba. No hay precios
+publicados, cobros, renovación automática ni editor del catálogo de planes.
 
 La API recalcula el acceso por solicitud: `statistics` devuelve
 `analysisAllowed` y solo admite filtros de Jugador con la capacidad
@@ -94,11 +94,19 @@ Después de la gratuidad puede mantenerse el nivel 1 operativo, sin comprar
 funciones premium ni aumentar cupos. El catálogo contempla vigencias mensual,
 trimestral, semestral y anual para Jugador de niveles 2/3 y Manager/Anotador de
 niveles 1/2/3. Los permisos de cada rol permanecen independientes.
-**Precios, checkout, cobros y renovación automática siguen deshabilitados.**
+Los precios pueden guardarse como borradores privados en administración, pero
+**publicación de precios, checkout, cobros y renovación automática siguen deshabilitados.**
 Actualmente solo el administrador puede conceder pruebas temporales.
 Los planes `manager-basic` y `scorekeeper-basic` mantienen operación básica
 sin habilitar estadísticas detalladas. Organizador continúa separado: su
 monetización se define por torneo, no mediante estas periodicidades.
+
+En `/admin`, la pestaña Precios permite guardar importes por plan y duración,
+paquetes y cargos de Organizador, acceso puntual de Anotador y conceptos
+adicionales. Un importe vacío significa sin configurar; cero es explícito.
+Los borradores se conservan en la base de cuentas y requieren la cuenta
+administradora. La revisión evita sobrescribir cambios de otro dispositivo y
+cada modificación queda registrada. No se publican ni activan accesos o pagos.
 
 Las pruebas administrativas admiten `months:1|3|6|12` en vez de `expiresAt`,
 nunca ambos. El servidor calcula meses calendario en UTC y ajusta al último

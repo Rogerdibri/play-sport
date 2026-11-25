@@ -5,6 +5,7 @@ const { renderToStaticMarkup } = require('react-dom/server');
 const hooks = require('../app/navigation-hooks');
 const api = require('../app/account/access/access-request');
 const { default: Dashboard } = require('../app/admin/administration-dashboard');
+const { default: DraftPrices } = require('../app/admin/draft-prices');
 const { default: Example } = require('../app/admin/example/page');
 const { readAdministrationSnapshot, readOwnAccountAccess, readAccountProfile, readTrialChange } = require('@playsport/shared');
 
@@ -49,6 +50,34 @@ test('background refresh keeps existing cards stable instead of inserting a load
   assert.ok(e.button('Gestionar accesos de Jugador de ejemplo'));
   e.data(null);
   assert.match(e.text(e.render()[0]), /Consultando usuarios/);
+});
+test('draft price selectors preserve plan and duration keys, special charges and saved custom concepts', t => {
+  let index = 0;
+  const states = new Map([[0, [
+    { key: 'manager-numbers:12', name: 'Manager · Nivel 2 · Mis equipos por juego · Anual', currency: 'USD', amountCents: 2475, revision: 1, updatedAt: '2026-11-24T00:00:00.000Z' },
+    { key: 'custom:example', name: 'Concepto adicional', currency: 'USD', amountCents: 0, revision: 1, updatedAt: '2026-11-24T00:00:00.000Z' },
+  ]]]);
+  t.mock.method(React, 'useState', initial => {
+    const key = index++;
+    if (!states.has(key)) states.set(key, initial);
+    return [states.get(key), next => states.set(key, typeof next === 'function' ? next(states.get(key)) : next)];
+  });
+  t.mock.method(React, 'useEffect', () => {});
+  const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(nodes) : [node, ...nodes(node.props?.children)];
+  const text = node => Array.isArray(node) ? node.map(text).join('') : node && typeof node === 'object' ? text(node.props?.children) : String(node ?? '');
+  const render = () => { index = 0; return nodes(DraftPrices({ accountId: 'admin' })); };
+  const field = name => nodes(render().find(node => node.type === 'label' && text(node.props.children).startsWith(name)))
+    .find(node => node.type === 'select' || node.type === 'input');
+  const change = (name, value) => field(name).props.onChange({ target: { value } });
+  change('Rol', 'manager'); change('Nivel', 'manager-numbers'); change('Duración', '12');
+  assert.equal(field('Importe').props.value, '24.75');
+  change('Rol', 'scorekeeper'); change('Nivel', 'extra-game');
+  assert.equal(field('Duración'), undefined);
+  change('Rol', 'organizer');
+  assert.equal(field('Paquete o concepto').props.value, 'organizer:small');
+  change('Rol', 'other');
+  assert.equal(field('Concepto').props.value, 'custom:example');
+  assert.equal(field('Importe').props.value, '0.00');
 });
 test('example shows distinct active, expired, revoked and missing trials without touching an account', t => {
   const e = fixture(t, true), markup = renderToStaticMarkup(e.render()[0]);

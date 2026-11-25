@@ -14,7 +14,7 @@ class AccountError extends Error {
   constructor(message: string, status: number) { super(message); this.status = status; }
 }
 
-async function requestAccount(action: string, body?: Record<string, string>): Promise<AccountProfile | null> {
+export async function requestAccount(action: string, body?: Record<string, string>): Promise<AccountProfile | null> {
   const response = await fetch(`/api/accounts/${action}`, { method: body ? 'POST' : 'GET', cache: 'no-store',
     ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
   if (response.status === 204) return null;
@@ -151,11 +151,6 @@ export default function AccountAccess({ section = 'security' }: { section?: 'pro
         <p>{account.localTestAccess
           ? 'Esta sesión no vence por inactividad y se mantiene al cerrar el navegador. Cerrar sesión o borrar las cookies requiere volver a entrar. Cambiar la contraseña cierra las otras sesiones.'
           : 'Tu sesión se mantiene en este dispositivo aunque cierres el navegador, hasta que cierres sesión o pases 30 días sin entrar. Cambiar la contraseña cierra las otras sesiones.'}</p>
-        <button type="button" className="managerButtonOutline" disabled={busy} onClick={() => void run(async () => {
-          await requestAccount('logout', {});
-          setAccount(null); setEmail(''); setName(''); setPassword(''); setCurrentPassword(''); setNextPassword(''); setConfirmation('');
-          setNotice('Sesión cerrada.');
-        })}>Cerrar sesión de mi cuenta</button>
       </section>
       <p>El acceso con passkeys, huella o reconocimiento facial todavía no está habilitado.</p>
       <section className="managerCard managerStepCard">
